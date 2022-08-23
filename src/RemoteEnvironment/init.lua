@@ -3,6 +3,9 @@
 -- TODO : Consider prescribing a metatable to the table being wrapped in a proxy that prevents modification (__newindex only). (Use rawset rawget in getProxyListener instead)
 
 -- TODO : Follow event-subscription model. 
+
+-- TODO : For clarity's sake, separate containers for remote events that are Fired by server versus Client
+
 --[[
 	TODO :
 	* w
@@ -102,13 +105,29 @@ local function getProxyListener(t, accessSignal : BindableEvent, keyNamePath : s
 end
 
 if not Runs:IsClient() then -- Server :
+	local serverOwnedEnvironments = {}
+	local clientOwnedEnvironments = {}
+
+	SLEnvironment.Environments = {
+		Server = serverOwnedEnvironments,
+		Client = clientOwnedEnvironments
+	}
+
 	local LoadedEvent = Instance.new"RemoteEvent"
 	LoadedEvent.Name = "Loaded"
 	LoadedEvent.Parent = script
 
-	local createdEvent = Instance.new"RemoteEvent"
-	createdEvent.Name = "Created"
-	createdEvent.Parent = script
+	local createdServerEvent = Instance.new"RemoteEvent"
+	createdServerEvent.Name = "CreatedServerEvent"
+	createdServerEvent.Parent = script
+
+	local removedServerEvent = Instance.new"RemoteEvent"
+	removedServerEvent.Name = "RemovedServerEvent"
+	removedServerEvent.Parent = script
+
+	local createdClientEvent = Instance.new"RemoteEvent"
+	createdClientEvent.Name = "CreatedClientEvent"
+	createdClientEvent.Parent = script
 
 	local playersInfo = {}
 
@@ -126,41 +145,6 @@ if not Runs:IsClient() then -- Server :
 		return pInfo
 	end
 
-	local registrationHandlers = {
-		Server = function()
-			
-		end,
-		Client = function(name)
-			local cachedEnvs = {} -- ! Possible danger of a player disconnecting from server, reconnecting and having their old cache.
-			
-			registeredEnvironments[name].Updated:Connect(function(player, dataPath, key, value)
-				-- InBoundMiddleware
-				local cEnv = cachedEnvs[player]
-				
-				if not cEnv then
-					cachedEnvs[player] = playersInfo[player].ClientEnvs[name]
-					cEnv = cachedEnvs[player]
-				end
-				
-				local terminalNode = cEnv
-		
-				local theseNodes = dataPath:split"."
-
-				table.remove(theseNodes, 1) -- "Removing the Base node"
-
-				for nodeIndex, node in ipairs(theseNodes) do
-					terminalNode = terminalNode[node]
-				end
-
-				if type(terminalNode[key]) == "table" then closeTable(terminalNode[key]) end
-				
-				terminalNode[key] = value
-
-				cEnv.Changed:Fire(dataPath, key, value) -- * ?? Do we need this ?
-			end)
-		end
-	}
-
 	local function getEnv(name)
 		if registeredEnvironments[name] then 
 			return registeredEnvironments[name] 
@@ -175,102 +159,235 @@ if not Runs:IsClient() then -- Server :
 		end
 	end
 
-	local creationHandlers = {
-		Server = function(envName, iniT)
-			local pInfo = WaitForPlayerInfo(player)
-		
-			if not pInfo then
-				return warn(player.Name .. " failed to load in time")
-			end
+	local metaData = {}
 
-			local accessSignal = Signal.new()
+	function SLEnvironment:CreateServerHost(envType, iniT : table ?)
+		local Subscribers = {}
 
-			local pL = getProxyListener(iniT, accessSignal)
+		local accessSignal = Signal.new()
 
-			do
-				local envUpdatedEvent = getEnv(name)
+		local pL = getProxyListener(iniT, accessSignal)
 
-				table.insert(pInfo.Connections, accessSignal:Connect(function(dataPath, key, value)
+		do
+			local envUpdatedEvent = getEnv(envType)
+
+			accessSignal:Connect(function(dataPath, key, value)
+				for _, player in ipairs(Subscribers) do
 					envUpdatedEvent:FireClient(player, dataPath, key, value)
-				end))	
-			end
+				end
+			end)
+		end
 
-			createdEvent:FireClient(player, remoteEnvironment.Name, "Exclusive", iniT)
+		metaData[pL] = {
+			Subscribers = Subscribers,
+			Type = envType,
+			Signal = accessSignal
+		}
 
-			return pL
-		end,
-		Client = function(name)
+		if not serverOwnedEnvironments[envType] then serverOwnedEnvironments[envType] = {} end
+
+		table.insert(serverOwnedEnvironments[envType], pL)
+
+		return pL
+	end
+
+	function SLEnvironment:DestroyServerHost(remoteEnvironment)
+		local pMeta = metaData[remoteEnvironment]
+
+		pMeta.Signal:Destroy()
+
+		for index, sub in ipairs(pMeta.Subscribers) do
+			removedServerEvent:FireClient(sub, pMeta.Type)
+		end
+
+		table.remove(serverOwnedEnvironments[pMeta.Type], table.find(serverOwnedEnvironments[pMeta.Type], remoteEnvironment))
+
+		table.clear(pMeta.Subscribers)
+		table.clear(pMeta)
+
+
+		metaData[remoteEnvironment] = nil
+	end
+
+	local _cEventConns = {}
+
+	function SLEnvironment:CreateForClient(envType, player, iniT : table ?)
+		local pInfo = WaitForPlayerInfo(player)
+		
+		if not pInfo then
+			return warn(player.Name .. " failed to load in time")
+		end
+		
+		local tClone = DeepCopy(iniT)
+
+		local cEnvs = playersInfo[player].ClientEnvs
+		
+		if cEnvs[envType] then warn(envType, "is being overwritten for " .. player.Name) end
+		cEnvs[envType] = tClone
+
+		if not _cEventConns[envType] then
 			local cachedEnvs = {} -- ! Possible danger of a player disconnecting from server, reconnecting and having their old cache.
 
-			registeredEnvironments[name].Updated:Connect(function(player, dataPath, key, value)
+			_cEventConns[envType] = getEnv(envType):Connect(function(player, dataPath, key, value)
 				local cEnv = cachedEnvs[player]
 				
 				if not cEnv then
-					cachedEnvs[player] = playersInfo[player].ClientEnvs[name]
+					cachedEnvs[player] = playersInfo[player].ClientEnvs[envType]
 					cEnv = cachedEnvs[player]
+
+					if not cEnv then return warn("Recieved client environment update, but no ClientEnv exists on the server.") end
 				end
 				
 				local terminalNode = cEnv
 		
 				local theseNodes = dataPath:split"."
-
-				table.remove(theseNodes, 1) -- "Removing the Base node"
-
-				for nodeIndex, node in ipairs(theseNodes) do
-					terminalNode = terminalNode[node]
+	
+				-- Skip first instead of removing. Removing is an order N operation.
+				for nodeIndex = 2, #theseNodes do
+					terminalNode = terminalNode[theseNodes[nodeIndex]]
 				end
 
+	
 				if type(terminalNode[key]) == "table" then closeTable(terminalNode[key]) end
 				
 				terminalNode[key] = value
-
+	
 				cEnv.Changed:Fire(dataPath, key, value) -- * ?? Do we need this ?
 			end)
 		end
-	}
 
-	function SLEnvironment:Create(envName, envType, iniT : table ?)
-		local rEnv = registeredEnvironments[envName]
+		createdClientEvent:FireClient(player, envType, iniT)
 
-		return creationHandlers[envType](envName, iniT)
+		return tClone
 	end
 
-	meta = {
-		Proxy,
-		Subscribers = {}
-	}
+	function SLEnvironment:Subscribe(remoteEnvironment, player)
+		local pInfo = WaitForPlayerInfo(player)
+		
+		if not pInfo then
+			return warn(player.Name .. " failed to load in time")
+		end
+
+		local remEnvMeta = metaData[remoteEnvironment]
+
+		if pInfo.Subscriptions[remEnvMeta.Type] then warn(player, "already subscribed to an environment of type", remEnvMeta.Type) end
+
+		table.insert(remEnvMeta.Subscribers, player)
+
+		createdServerEvent:FireClient(player, remEnvMeta.Type, remoteEnvironment._true)
+
+		pInfo.Subscriptions[remEnvMeta.Type] = true
+	end
+	
+	function SLEnvironment:Unsubscribe(remoteEnvironment, player)
+		local remEnvMeta = metaData[remoteEnvironment]
+
+		table.remove(remEnvMeta.Subscribers, table.find(remEnvMeta.Subscribers, player))
+
+		removedServerEvent:FireClient(player, remEnvMeta.Type)
+
+		playersInfo[player].Subscriptions[remEnvMeta.Type] = false
+	end
 
 	LoadedEvent.OnServerEvent:Connect(function(player)
-		-- TODO : Init
+		local thisClientEnvs = {}
+
+		clientOwnedEnvironments[player] = thisClientEnvs
 
 		playersInfo[player] = {
 			Subscriptions = {},
-			ClientEnvs = {},
-			Connections = {}
+			ClientEnvs = thisClientEnvs,
 		}
 	end)
 
 	game:GetService"Players".PlayerRemoving:Connect(function(player)
-		-- TODO : disconnect and destroy all.
+		-- TODO : disconnect and destroy all : ClientOwnedEnvironments; 
 
 		playersInfo[player] = nil
 	end)
 else -- Client :
-	local creationHandlers = {
-		Exclusive = function(remoteEnvironment, iniT, player)
-		end,
-		Gloabl = function(remoteEnvironment, iniT, player)
-		end,
-		Multi = function(remoteEnvironment, iniT, player)
-			
-		end,
-		Client = function(name)
+	local serverOwnedEnvironments = {}
+	local clientOwnedEnvironments = {}
 
-		end
+	SLEnvironment.Environments = {
+		Server = serverOwnedEnvironments,
+		Client = clientOwnedEnvironments
 	}
 
-	script:WaitForChild"Created".OnClientEvent:Connect(function(envName, envType, iniT)
+	function SLEnvironment:WaitForServer(envType : string)
+		while not serverOwnedEnvironments[envType] do
+			wait()
+		end
+
+		return serverOwnedEnvironments[envType]
+	end
+
+	function SLEnvironment:WaitForClient(envType : string)
+		while not clientOwnedEnvironments[envType] do
+			wait()
+		end
+
+		return clientOwnedEnvironments[envType]
+	end
+
+	function SLEnvironment:ConnectToUpdate(envType, keyPath : string, func : (remainingNodes : {string}, value : any) -> nil)
+		local connectionNodes = keyPath:split"."
+	
+		return script.Env:WaitForChild("Updated" .. envType, WAIT_TIMEOUT):Connect(function(path : string, nodeKey, value : any)
+			local splitNodes = path:split"."
+	
+			for i = #connectionNodes, 1, -1 do
+				if connectionNodes[i] ~= splitNodes[i] then return end
+	
+				table.remove(splitNodes, i)
+			end
+	
+			table.insert(splitNodes, nodeKey)
+	
+			func(splitNodes, value)
+		end)
+	end
+
+	local metaData = {}
+
+	script:WaitForChild"CreatedServerEvent".OnClientEvent:Connect(function(envType, iniT)
+		if serverOwnedEnvironments[envType] then warn(envType, "environment being overwritten") end
+
+		serverOwnedEnvironments[envType] = iniT
+
+		-- TODO : if metadata already exists, need to clean it first.
+
+		local thisMeta = {}
+		metaData[envType] = thisMeta
+
+		thisMeta.Connection = script.Env:WaitForChild("Updated" .. envType):Connect(function(dataPath, key, value)
+			local terminalNode = iniT
+	
+			local theseNodes = dataPath:split"."
+
+			-- Skip first instead of removing. Removing is an order N operation.
+			for nodeIndex = 2, #theseNodes do
+				terminalNode = terminalNode[theseNodes[nodeIndex]]
+			end
+
+			if type(terminalNode[key]) == "table" then closeTable(terminalNode[key]) end
+			
+			terminalNode[key] = value
+		end)
+	end)
+
+	script:WaitForChild"RemovedServerEvent".OnClientEvent:Connect(function(envType)
 		
+	end)
+
+	script:WaitForChild"CreatedClientEvent".OnClientEvent:Connect(function(envType, iniT)
+		local accessSignal = Signal.new()
+
+		getProxyListener(iniT, accessSignal)
+
+		accessSignal:Connect(function(dataPath : string, key, value)
+			script.Env:WaitForChild("Updated" .. envType):Fire(dataPath, key, value)
+		end)
 	end)
 
 	script:WaitForChild"Loaded":FireServer()
