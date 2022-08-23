@@ -7,16 +7,11 @@
 -- TODO : For clarity's sake, separate containers for remote events that are Fired by server versus Client
 
 --[[
-	TODO :
-	* w
-	* e
-	-- line 3
 
-]]
--- // wut
---[[
-	* noob
-	! omg 
+	Notes : 
+
+	- Environments of type are UNIQUE on Client, NON-UNIQUE on server
+
 ]]
 
 -- Exclusive, Multi, Global, Client
@@ -28,9 +23,6 @@ local Players = game:GetService"Players"
 local Runs = game:GetService"RunService"
 
 local Signal = require(script.Parent.Signal)
-
-local Utilities = _G.Utilities
-local TableDeepCopy = Utilities.Get"Table".DeepCopy
 
 local ENVIRONMENT_TYPES = {
 	Server = "Server",
@@ -130,6 +122,7 @@ if not Runs:IsClient() then -- Server :
 	createdClientEvent.Parent = script
 
 	local playersInfo = {}
+	local connectionsToClientEnvironment = {}
 
 	local function WaitForPlayerInfo(player)
 		local pInfo = playersInfo[player]
@@ -261,6 +254,14 @@ if not Runs:IsClient() then -- Server :
 		return tClone
 	end
 
+	function SLEnvironment:ConnectToClient(player, envType, func)
+		return getEnv(envType):Connect(function(firingPlayer, dataPath, key, value)
+			if player ~= firingPlayer then return end
+
+			func(dataPath, key, value)
+		end)
+	end
+
 	function SLEnvironment:Subscribe(remoteEnvironment, player)
 		local pInfo = WaitForPlayerInfo(player)
 		
@@ -330,6 +331,10 @@ else -- Client :
 		return clientOwnedEnvironments[envType]
 	end
 
+	function SLEnvironment:ConnectTo(envType : string, func)
+		return script.Env:WaitForChild("Updated" .. envType):Connect(func)
+	end
+
 	function SLEnvironment:ConnectToUpdate(envType, keyPath : string, func : (remainingNodes : {string}, value : any) -> nil)
 		local connectionNodes = keyPath:split"."
 	
@@ -377,17 +382,27 @@ else -- Client :
 	end)
 
 	script:WaitForChild"RemovedServerEvent".OnClientEvent:Connect(function(envType)
-		
+		if not metaData[envType] then return warn("None", envType) end
+
+		metaData[envType].Connection:Disconnect()
+
+		-- TODO : Notify before closing the table.
+
+		closeTable(serverOwnedEnvironments[envType])
+
+		serverOwnedEnvironments[envType] = nil
 	end)
 
 	script:WaitForChild"CreatedClientEvent".OnClientEvent:Connect(function(envType, iniT)
 		local accessSignal = Signal.new()
 
-		getProxyListener(iniT, accessSignal)
+		local pL = getProxyListener(iniT, accessSignal)
 
 		accessSignal:Connect(function(dataPath : string, key, value)
 			script.Env:WaitForChild("Updated" .. envType):Fire(dataPath, key, value)
 		end)
+
+		clientOwnedEnvironments[envType] = pL
 	end)
 
 	script:WaitForChild"Loaded":FireServer()
