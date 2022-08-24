@@ -417,8 +417,10 @@ else -- Client :
 
 		local pL = getProxyListener(iniT, accessSignal)
 
+		local updatedEvent = script.Env:WaitForChild("Updated" .. envType, WAIT_TIMEOUT)
+
 		accessSignal:Connect(function(dataPath : string, key, value)
-			script.Env:WaitForChild("Updated" .. envType, WAIT_TIMEOUT):FireServer(dataPath, key, value)
+			updatedEvent:FireServer(dataPath, key, value)
 		end)
 
 		clientOwnedEnvironments[envType] = pL
