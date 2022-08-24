@@ -22,7 +22,7 @@ local RS = game:GetService("ReplicatedStorage")
 local Players = game:GetService"Players"
 local Runs = game:GetService"RunService"
 
-local Signal = require(script.Parent.Signal)
+local Signal = require(script.Signal)
 
 local ENVIRONMENT_TYPES = {
 	Server = "Server",
@@ -34,6 +34,28 @@ SLEnvironment.Types = ENVIRONMENT_TYPES
 
 local registeredEnvironments = {}
 
+local function DeepCopy(t, preserveMetatable : boolean?, preserveFunctions : boolean?)
+	local copy = {}
+
+	local selfFunc = DeepCopy -- Caching the function because it is being indexed multiple times in the loop.
+
+	for i, v in pairs(t) do
+		if type(v) == "function" then
+			if not preserveFunctions then continue end
+		elseif typeof(v) == "table" then
+			copy[i] = selfFunc(v)
+		else
+			copy[i] = v
+		end
+	end
+	
+	if preserveMetatable then
+		setmetatable(copy, getmetatable(t))
+	end
+	
+	return copy
+end
+	
 local function closeTable(t)
 	setmetatable(t, {
 		__index = function()
@@ -121,16 +143,16 @@ if not Runs:IsClient() then -- Server :
 	createdClientEvent.Name = "CreatedClientEvent"
 	createdClientEvent.Parent = script
 
-	local playersInfo = {}
+	local loadedPlayers = {}
 	local connectionsToClientEnvironment = {}
 
-	local function WaitForPlayerInfo(player)
-		local pInfo = playersInfo[player]
+	local function WaitForPlayerLoaded(player)
+		local pInfo = loadedPlayers[player]
 
 		local s = tick()
 
 		while not pInfo and (tick() - s < WAIT_TIMEOUT) do
-			pInfo = playersInfo[player]
+			pInfo = loadedPlayers[player]
 
 			wait()
 		end
@@ -205,27 +227,20 @@ if not Runs:IsClient() then -- Server :
 	local _cEventConns = {}
 
 	function SLEnvironment:CreateForClient(envType, player, iniT : table ?)
-		local pInfo = WaitForPlayerInfo(player)
-		
-		if not pInfo then
-			return warn(player.Name .. " failed to load in time")
-		end
-		
+		if not WaitForPlayerLoaded(player) then	return warn(player.Name .. " failed to load in time") end
+
 		local tClone = DeepCopy(iniT)
 
-		local cEnvs = playersInfo[player].ClientEnvs
-		
-		if cEnvs[envType] then warn(envType, "is being overwritten for " .. player.Name) end
-		cEnvs[envType] = tClone
+		clientOwnedEnvironments[player][envType] = tClone
 
 		if not _cEventConns[envType] then
 			local cachedEnvs = {} -- ! Possible danger of a player disconnecting from server, reconnecting and having their old cache.
 
-			_cEventConns[envType] = getEnv(envType):Connect(function(player, dataPath, key, value)
+			_cEventConns[envType] = getEnv(envType).OnServerEvent:Connect(function(player, dataPath, key, value)
 				local cEnv = cachedEnvs[player]
 				
 				if not cEnv then
-					cachedEnvs[player] = playersInfo[player].ClientEnvs[envType]
+					cachedEnvs[player] = clientOwnedEnvironments[player][envType]
 					cEnv = cachedEnvs[player]
 
 					if not cEnv then return warn("Recieved client environment update, but no ClientEnv exists on the server.") end
@@ -245,7 +260,7 @@ if not Runs:IsClient() then -- Server :
 				
 				terminalNode[key] = value
 	
-				cEnv.Changed:Fire(dataPath, key, value) -- * ?? Do we need this ?
+				-- cEnv.Changed:Fire(dataPath, key, value) -- * ?? Do we need this ?
 			end)
 		end
 
@@ -255,7 +270,7 @@ if not Runs:IsClient() then -- Server :
 	end
 
 	function SLEnvironment:ConnectToClient(player, envType, func)
-		return getEnv(envType):Connect(function(firingPlayer, dataPath, key, value)
+		return getEnv(envType).OnServerEvent:Connect(function(firingPlayer, dataPath, key, value)
 			if player ~= firingPlayer then return end
 
 			func(dataPath, key, value)
@@ -263,7 +278,7 @@ if not Runs:IsClient() then -- Server :
 	end
 
 	function SLEnvironment:Subscribe(remoteEnvironment, player)
-		local pInfo = WaitForPlayerInfo(player)
+		local pInfo = WaitForPlayerLoaded(player)
 		
 		if not pInfo then
 			return warn(player.Name .. " failed to load in time")
@@ -271,13 +286,11 @@ if not Runs:IsClient() then -- Server :
 
 		local remEnvMeta = metaData[remoteEnvironment]
 
-		if pInfo.Subscriptions[remEnvMeta.Type] then warn(player, "already subscribed to an environment of type", remEnvMeta.Type) end
+		if table.find(remEnvMeta.Subscribers, player) then warn(player, "already subscribed to an environment of type", remEnvMeta.Type) end
 
 		table.insert(remEnvMeta.Subscribers, player)
 
 		createdServerEvent:FireClient(player, remEnvMeta.Type, remoteEnvironment._true)
-
-		pInfo.Subscriptions[remEnvMeta.Type] = true
 	end
 	
 	function SLEnvironment:Unsubscribe(remoteEnvironment, player)
@@ -286,25 +299,31 @@ if not Runs:IsClient() then -- Server :
 		table.remove(remEnvMeta.Subscribers, table.find(remEnvMeta.Subscribers, player))
 
 		removedServerEvent:FireClient(player, remEnvMeta.Type)
-
-		playersInfo[player].Subscriptions[remEnvMeta.Type] = false
 	end
 
 	LoadedEvent.OnServerEvent:Connect(function(player)
-		local thisClientEnvs = {}
+		clientOwnedEnvironments[player] = {}
 
-		clientOwnedEnvironments[player] = thisClientEnvs
-
-		playersInfo[player] = {
-			Subscriptions = {},
-			ClientEnvs = thisClientEnvs,
-		}
+		loadedPlayers[player] = true
 	end)
 
 	game:GetService"Players".PlayerRemoving:Connect(function(player)
-		-- TODO : disconnect and destroy all : ClientOwnedEnvironments; 
+		-- TODO : Include OnDisconnected callbacks so that other services have a chance to retrieve the table.
 
-		playersInfo[player] = nil
+		for _, value in ipairs(serverOwnedEnvironments) do
+			local thisMetaData = metaData[value]
+
+			local index = table.find(thisMetaData.Subscribers, player)
+
+			if index then
+				table.remove(thisMetaData.Subscribers, index)
+			end
+		end
+
+		-- TODO : Decide whether dropping references is enough, or if we should close the tables.
+		table.clear(clientOwnedEnvironments[player])
+
+		loadedPlayers[player] = nil
 	end)
 else -- Client :
 	local serverOwnedEnvironments = {}
@@ -332,13 +351,13 @@ else -- Client :
 	end
 
 	function SLEnvironment:ConnectTo(envType : string, func)
-		return script.Env:WaitForChild("Updated" .. envType):Connect(func)
+		return script.Env:WaitForChild("Updated" .. envType, WAIT_TIMEOUT).OnClientEvent:Connect(func)
 	end
 
 	function SLEnvironment:ConnectToUpdate(envType, keyPath : string, func : (remainingNodes : {string}, value : any) -> nil)
 		local connectionNodes = keyPath:split"."
 	
-		return script.Env:WaitForChild("Updated" .. envType, WAIT_TIMEOUT):Connect(function(path : string, nodeKey, value : any)
+		return script.Env:WaitForChild("Updated" .. envType, WAIT_TIMEOUT).OnClientEvent:Connect(function(path : string, nodeKey, value : any)
 			local splitNodes = path:split"."
 	
 			for i = #connectionNodes, 1, -1 do
@@ -355,7 +374,7 @@ else -- Client :
 
 	local metaData = {}
 
-	script:WaitForChild"CreatedServerEvent".OnClientEvent:Connect(function(envType, iniT)
+	script:WaitForChild("CreatedServerEvent").OnClientEvent:Connect(function(envType, iniT)
 		if serverOwnedEnvironments[envType] then warn(envType, "environment being overwritten") end
 
 		serverOwnedEnvironments[envType] = iniT
@@ -365,7 +384,7 @@ else -- Client :
 		local thisMeta = {}
 		metaData[envType] = thisMeta
 
-		thisMeta.Connection = script.Env:WaitForChild("Updated" .. envType):Connect(function(dataPath, key, value)
+		thisMeta.Connection = script.Env:WaitForChild("Updated" .. envType, WAIT_TIMEOUT).OnClientEvent:Connect(function(dataPath, key, value)
 			local terminalNode = iniT
 	
 			local theseNodes = dataPath:split"."
@@ -381,7 +400,7 @@ else -- Client :
 		end)
 	end)
 
-	script:WaitForChild"RemovedServerEvent".OnClientEvent:Connect(function(envType)
+	script:WaitForChild("RemovedServerEvent").OnClientEvent:Connect(function(envType)
 		if not metaData[envType] then return warn("None", envType) end
 
 		metaData[envType].Connection:Disconnect()
@@ -399,7 +418,7 @@ else -- Client :
 		local pL = getProxyListener(iniT, accessSignal)
 
 		accessSignal:Connect(function(dataPath : string, key, value)
-			script.Env:WaitForChild("Updated" .. envType):Fire(dataPath, key, value)
+			script.Env:WaitForChild("Updated" .. envType, WAIT_TIMEOUT):FireServer(dataPath, key, value)
 		end)
 
 		clientOwnedEnvironments[envType] = pL
