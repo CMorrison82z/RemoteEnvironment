@@ -32,8 +32,6 @@ local ENVIRONMENT_TYPES = {
 local SLEnvironment = {}
 SLEnvironment.Types = ENVIRONMENT_TYPES
 
-local registeredEnvironments = {}
-
 local function DeepCopy(t, preserveMetatable : boolean?, preserveFunctions : boolean?)
 	local copy = {}
 
@@ -48,14 +46,14 @@ local function DeepCopy(t, preserveMetatable : boolean?, preserveFunctions : boo
 			copy[i] = v
 		end
 	end
-	
+
 	if preserveMetatable then
 		setmetatable(copy, getmetatable(t))
 	end
-	
+
 	return copy
 end
-	
+
 local function closeTable(t)
 	setmetatable(t, {
 		__index = function()
@@ -80,17 +78,17 @@ local function getProxyListener(t, accessSignal : BindableEvent, keyNamePath : s
 
 	proxMeta.__index = function(self, k)
 		local val = t[k]
-		
+
 		if val == nil then
 			local interpretedKey = k:gsub("_", "")
-			
+
 			if interpretedKey == "true" then
 				return t
 			else
 				return t[interpretedKey]
 			end
 		end		
-		
+
 		if type(val) == "table" then
 			return getProxyListener(val, accessSignal, keyNamePath .. "." .. k)
 		else
@@ -143,6 +141,15 @@ if not Runs:IsClient() then -- Server :
 	createdClientEvent.Name = "CreatedClientEvent"
 	createdClientEvent.Parent = script
 
+	local serverEnvCont = Instance.new"Folder"
+	serverEnvCont.Name = "ServerEnvironments"
+	serverEnvCont.Parent = script
+
+	local clientEnvCont = Instance.new"Folder"
+	clientEnvCont.Name = "ClientEnvironments"
+	clientEnvCont.Parent = script
+
+
 	local loadedPlayers = {}
 	local connectionsToClientEnvironment = {}
 
@@ -160,17 +167,31 @@ if not Runs:IsClient() then -- Server :
 		return pInfo
 	end
 
-	local function getEnv(name)
-		if registeredEnvironments[name] then 
-			return registeredEnvironments[name] 
+	local function getServerEnv(name)
+		local thisEnv = serverEnvCont:FindFirstChild(name)
+
+		if thisEnv then 
+			return thisEnv 
 		else		
 			local updatedEvent = Instance.new"RemoteEvent"
 			updatedEvent.Name = "Updated" .. name
-			updatedEvent.Parent = script.Env
-	
-			registeredEnvironments[name] = updatedEvent
+			updatedEvent.Parent = serverEnvCont
 
-			return registeredEnvironments[name]
+			return updatedEvent
+		end
+	end
+
+	local function getClientEnv(name)
+		local thisEnv = clientEnvCont:FindFirstChild(name)
+
+		if thisEnv then 
+			return thisEnv 
+		else		
+			local updatedEvent = Instance.new"RemoteEvent"
+			updatedEvent.Name = "Updated" .. name
+			updatedEvent.Parent = clientEnvCont
+
+			return updatedEvent
 		end
 	end
 
@@ -184,7 +205,7 @@ if not Runs:IsClient() then -- Server :
 		local pL = getProxyListener(iniT, accessSignal)
 
 		do
-			local envUpdatedEvent = getEnv(envType)
+			local envUpdatedEvent = getServerEnv(envType)
 
 			accessSignal:Connect(function(dataPath, key, value)
 				for _, player in ipairs(Subscribers) do
@@ -226,7 +247,7 @@ if not Runs:IsClient() then -- Server :
 
 	local _cEventConns = {}
 
-	function SLEnvironment:CreateForClient(envType, player, iniT : table ?)
+	function SLEnvironment:CreateClientHost(player, envType, iniT : table ?)
 		if not WaitForPlayerLoaded(player) then	return warn(player.Name .. " failed to load in time") end
 
 		local tClone = DeepCopy(iniT)
@@ -236,30 +257,30 @@ if not Runs:IsClient() then -- Server :
 		if not _cEventConns[envType] then
 			local cachedEnvs = {} -- ! Possible danger of a player disconnecting from server, reconnecting and having their old cache.
 
-			_cEventConns[envType] = getEnv(envType).OnServerEvent:Connect(function(player, dataPath, key, value)
+			_cEventConns[envType] = getClientEnv(envType).OnServerEvent:Connect(function(player, dataPath, key, value)
 				local cEnv = cachedEnvs[player]
-				
+
 				if not cEnv then
 					cachedEnvs[player] = clientOwnedEnvironments[player][envType]
 					cEnv = cachedEnvs[player]
 
 					if not cEnv then return warn("Recieved client environment update, but no ClientEnv exists on the server.") end
 				end
-				
+
 				local terminalNode = cEnv
-		
+
 				local theseNodes = dataPath:split"."
-	
+
 				-- Skip first instead of removing. Removing is an order N operation.
 				for nodeIndex = 2, #theseNodes do
 					terminalNode = terminalNode[theseNodes[nodeIndex]]
 				end
 
-	
+
 				if type(terminalNode[key]) == "table" then closeTable(terminalNode[key]) end
-				
+
 				terminalNode[key] = value
-	
+
 				-- cEnv.Changed:Fire(dataPath, key, value) -- * ?? Do we need this ?
 			end)
 		end
@@ -270,16 +291,36 @@ if not Runs:IsClient() then -- Server :
 	end
 
 	function SLEnvironment:ConnectToClient(player, envType, func)
-		return getEnv(envType).OnServerEvent:Connect(function(firingPlayer, dataPath, key, value)
+		return getClientEnv(envType).OnServerEvent:Connect(function(firingPlayer, dataPath, key, value)
 			if player ~= firingPlayer then return end
 
 			func(dataPath, key, value)
 		end)
 	end
 
+	function SLEnvironment:ConnectToClientPath(player, envType, keyPath : string, func : (remainingNodes : {string}, value : any) -> nil)
+		local connectionNodes = keyPath:split"."
+
+		return getClientEnv(envType).OnServerEvent:Connect(function(firingPlayer, path : string, nodeKey, value : any)
+			if firingPlayer ~= player then return end
+			
+			local splitNodes = path:split"."
+
+			for i = #connectionNodes, 1, -1 do
+				if connectionNodes[i] ~= splitNodes[i] then return end
+
+				table.remove(splitNodes, i)
+			end
+
+			table.insert(splitNodes, nodeKey)
+
+			func(splitNodes, value)
+		end)
+	end
+
 	function SLEnvironment:Subscribe(remoteEnvironment, player)
 		local pInfo = WaitForPlayerLoaded(player)
-		
+
 		if not pInfo then
 			return warn(player.Name .. " failed to load in time")
 		end
@@ -292,7 +333,7 @@ if not Runs:IsClient() then -- Server :
 
 		createdServerEvent:FireClient(player, remEnvMeta.Type, remoteEnvironment._true)
 	end
-	
+
 	function SLEnvironment:Unsubscribe(remoteEnvironment, player)
 		local remEnvMeta = metaData[remoteEnvironment]
 
@@ -351,23 +392,23 @@ else -- Client :
 	end
 
 	function SLEnvironment:ConnectTo(envType : string, func)
-		return script.Env:WaitForChild("Updated" .. envType, WAIT_TIMEOUT).OnClientEvent:Connect(func)
+		return script.ServerEnvironments:WaitForChild("Updated" .. envType, WAIT_TIMEOUT).OnClientEvent:Connect(func)
 	end
 
-	function SLEnvironment:ConnectToUpdate(envType, keyPath : string, func : (remainingNodes : {string}, value : any) -> nil)
+	function SLEnvironment:ConnectToEnvironmentPath(envType, keyPath : string, func : (remainingNodes : {string}, value : any) -> nil)
 		local connectionNodes = keyPath:split"."
-	
-		return script.Env:WaitForChild("Updated" .. envType, WAIT_TIMEOUT).OnClientEvent:Connect(function(path : string, nodeKey, value : any)
+
+		return script.ServerEnvironments:WaitForChild("Updated" .. envType, WAIT_TIMEOUT).OnClientEvent:Connect(function(path : string, nodeKey, value : any)
 			local splitNodes = path:split"."
-	
+
 			for i = #connectionNodes, 1, -1 do
 				if connectionNodes[i] ~= splitNodes[i] then return end
-	
+
 				table.remove(splitNodes, i)
 			end
-	
+
 			table.insert(splitNodes, nodeKey)
-	
+
 			func(splitNodes, value)
 		end)
 	end
@@ -383,10 +424,10 @@ else -- Client :
 
 		local thisMeta = {}
 		metaData[envType] = thisMeta
-
-		thisMeta.Connection = script.Env:WaitForChild("Updated" .. envType, WAIT_TIMEOUT).OnClientEvent:Connect(function(dataPath, key, value)
+		
+		thisMeta.Connection = script.ServerEnvironments:WaitForChild("Updated" .. envType, WAIT_TIMEOUT).OnClientEvent:Connect(function(dataPath, key, value)
 			local terminalNode = iniT
-	
+
 			local theseNodes = dataPath:split"."
 
 			-- Skip first instead of removing. Removing is an order N operation.
@@ -395,7 +436,7 @@ else -- Client :
 			end
 
 			if type(terminalNode[key]) == "table" then closeTable(terminalNode[key]) end
-			
+
 			terminalNode[key] = value
 		end)
 	end)
@@ -416,14 +457,15 @@ else -- Client :
 		local accessSignal = Signal.new()
 
 		local pL = getProxyListener(iniT, accessSignal)
-
-		local updatedEvent = script.Env:WaitForChild("Updated" .. envType, WAIT_TIMEOUT)
+		
+		local updatedEvent = script.ClientEnvironments:WaitForChild("Updated" .. envType, WAIT_TIMEOUT)
 
 		accessSignal:Connect(function(dataPath : string, key, value)
 			updatedEvent:FireServer(dataPath, key, value)
 		end)
-
+		
 		clientOwnedEnvironments[envType] = pL
+		
 	end)
 
 	script:WaitForChild"Loaded":FireServer()
