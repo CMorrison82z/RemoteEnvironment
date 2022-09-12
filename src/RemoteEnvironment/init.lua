@@ -22,6 +22,7 @@ local RS = game:GetService("ReplicatedStorage")
 local Players = game:GetService"Players"
 local Runs = game:GetService"RunService"
 
+local BridgeNet = require(script.BridgeNet)
 local Signal = require(script.Signal)
 
 local ENVIRONMENT_TYPES = {
@@ -117,6 +118,20 @@ local function getProxyListener(t, accessSignal : BindableEvent, keyNamePath : s
 end
 
 if not Runs:IsClient() then -- Server :
+	BridgeNet.Start({ -- server
+		[BridgeNet.DefaultReceive] = 60,
+		[BridgeNet.DefaultSend] = 60,
+		[BridgeNet.SendLogFunction] = function(remote, plrs, ...) 
+			local args = table.pack(...)
+			print(remote, plrs, args)
+		end,
+		[BridgeNet.ReceiveLogFunction] = function(remote, plr, ...)
+			print(remote, plr, ...)
+		end,
+	})
+
+	
+
 	local serverOwnedEnvironments = {}
 	local clientOwnedEnvironments = {}
 
@@ -141,13 +156,8 @@ if not Runs:IsClient() then -- Server :
 	createdClientEvent.Name = "CreatedClientEvent"
 	createdClientEvent.Parent = script
 
-	local serverEnvCont = Instance.new"Folder"
-	serverEnvCont.Name = "ServerEnvironments"
-	serverEnvCont.Parent = script
-
-	local clientEnvCont = Instance.new"Folder"
-	clientEnvCont.Name = "ClientEnvironments"
-	clientEnvCont.Parent = script
+	local serverBridges = {}
+	local clientBridges = {}
 
 
 	local loadedPlayers = {}
@@ -168,30 +178,28 @@ if not Runs:IsClient() then -- Server :
 	end
 
 	local function getServerEnv(name)
-		local thisEnv = serverEnvCont:FindFirstChild(name)
+		local thisEnv = serverBridges[name]
 
 		if thisEnv then 
 			return thisEnv 
 		else		
-			local updatedEvent = Instance.new"RemoteEvent"
-			updatedEvent.Name = "Updated" .. name
-			updatedEvent.Parent = serverEnvCont
+			local newBridge = BridgeNet.CreateBridge(name)
+			serverBridges[name] = newBridge
 
-			return updatedEvent
+			return newBridge
 		end
 	end
 
 	local function getClientEnv(name)
-		local thisEnv = clientEnvCont:FindFirstChild(name)
+		local thisEnv = clientBridges[name]
 
 		if thisEnv then 
 			return thisEnv 
 		else		
-			local updatedEvent = Instance.new"RemoteEvent"
-			updatedEvent.Name = "Updated" .. name
-			updatedEvent.Parent = clientEnvCont
+			local newBridge = BridgeNet.CreateBridge(name)
+			clientBridges[name] = newBridge
 
-			return updatedEvent
+			return newBridge
 		end
 	end
 
@@ -209,7 +217,7 @@ if not Runs:IsClient() then -- Server :
 
 			accessSignal:Connect(function(dataPath, key, value)
 				for _, player in ipairs(Subscribers) do
-					envUpdatedEvent:FireClient(player, dataPath, key, value)
+					envUpdatedEvent:FireTo(player, dataPath, key, value)
 				end
 			end)
 		end
@@ -257,7 +265,7 @@ if not Runs:IsClient() then -- Server :
 		if not _cEventConns[envType] then
 			local cachedEnvs = {} -- ! Possible danger of a player disconnecting from server, reconnecting and having their old cache.
 
-			_cEventConns[envType] = getClientEnv(envType).OnServerEvent:Connect(function(player, dataPath, key, value)
+			_cEventConns[envType] = getClientEnv(envType):Connect(function(player, dataPath, key, value)
 				local cEnv = cachedEnvs[player]
 
 				if not cEnv then
@@ -291,7 +299,7 @@ if not Runs:IsClient() then -- Server :
 	end
 
 	function SLEnvironment:ConnectToClient(player, envType, func)
-		return getClientEnv(envType).OnServerEvent:Connect(function(firingPlayer, dataPath, key, value)
+		return getClientEnv(envType):Connect(function(firingPlayer, dataPath, key, value)
 			if player ~= firingPlayer then return end
 
 			func(dataPath, key, value)
@@ -301,7 +309,7 @@ if not Runs:IsClient() then -- Server :
 	function SLEnvironment:ConnectToClientPath(player, envType, keyPath : string, func : (remainingNodes : {string}, value : any) -> nil)
 		local connectionNodes = keyPath:split"."
 
-		return getClientEnv(envType).OnServerEvent:Connect(function(firingPlayer, path : string, nodeKey, value : any)
+		return getClientEnv(envType):Connect(function(firingPlayer, path : string, nodeKey, value : any)
 			if firingPlayer ~= player then return end
 			
 			local splitNodes = path:split"."
@@ -367,13 +375,54 @@ if not Runs:IsClient() then -- Server :
 		loadedPlayers[player] = nil
 	end)
 else -- Client :
+	BridgeNet.Start({ -- server
+		[BridgeNet.DefaultReceive] = 60,
+		[BridgeNet.DefaultSend] = 60,
+		[BridgeNet.SendLogFunction] = function(remote, plrs, ...) 
+			local args = table.pack(...)
+			print(remote, plrs, args)
+		end,
+		[BridgeNet.ReceiveLogFunction] = function(remote, plr, ...)
+			print(remote, plr, ...)
+		end,
+	})
+
 	local serverOwnedEnvironments = {}
 	local clientOwnedEnvironments = {}
+
+	local serverClientBridges = {}
+	local clientServerBridges = {}
 
 	SLEnvironment.Environments = {
 		Server = serverOwnedEnvironments,
 		Client = clientOwnedEnvironments
 	}
+
+	local function getServerEnv(name)
+		local thisEnv = serverClientBridges[name]
+
+		if thisEnv then 
+			return thisEnv 
+		else		
+			local newBridge = BridgeNet.WaitForBridge(name)
+			serverClientBridges[name] = newBridge
+
+			return newBridge
+		end
+	end
+
+	local function getClientEnv(name)
+		local thisEnv = clientServerBridges[name]
+
+		if thisEnv then 
+			return thisEnv 
+		else		
+			local newBridge = BridgeNet.WaitForBridge(name)
+			clientServerBridges[name] = newBridge
+
+			return newBridge
+		end
+	end
 
 	function SLEnvironment:WaitForServer(envType : string)
 		while not serverOwnedEnvironments[envType] do
@@ -392,13 +441,13 @@ else -- Client :
 	end
 
 	function SLEnvironment:ConnectTo(envType : string, func)
-		return script.ServerEnvironments:WaitForChild("Updated" .. envType, WAIT_TIMEOUT).OnClientEvent:Connect(func)
+		return getServerEnv(envType):Connect(func)
 	end
 
 	function SLEnvironment:ConnectToEnvironmentPath(envType, keyPath : string, func : (remainingNodes : {string}, value : any) -> nil)
 		local connectionNodes = keyPath:split"."
 
-		return script.ServerEnvironments:WaitForChild("Updated" .. envType, WAIT_TIMEOUT).OnClientEvent:Connect(function(path : string, nodeKey, value : any)
+		return getServerEnv(envType):Connect(function(path : string, nodeKey, value : any)
 			local splitNodes = path:split"."
 
 			for i = #connectionNodes, 1, -1 do
@@ -425,7 +474,7 @@ else -- Client :
 		local thisMeta = {}
 		metaData[envType] = thisMeta
 		
-		thisMeta.Connection = script.ServerEnvironments:WaitForChild("Updated" .. envType, WAIT_TIMEOUT).OnClientEvent:Connect(function(dataPath, key, value)
+		thisMeta.Connection = getServerEnv(envType):Connect(function(dataPath, key, value)
 			local terminalNode = iniT
 
 			local theseNodes = dataPath:split"."
@@ -458,7 +507,7 @@ else -- Client :
 
 		local pL = getProxyListener(iniT, accessSignal)
 		
-		local updatedEvent = script.ClientEnvironments:WaitForChild("Updated" .. envType, WAIT_TIMEOUT)
+		local updatedEvent = getClientEnv(envType)
 
 		accessSignal:Connect(function(dataPath : string, key, value)
 			updatedEvent:FireServer(dataPath, key, value)
