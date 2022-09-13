@@ -16,8 +16,6 @@
 
 -- Exclusive, Multi, Global, Client
 
-local WAIT_TIMEOUT = 5 -- In Seconds 
-
 local RS = game:GetService("ReplicatedStorage")
 local Players = game:GetService"Players"
 local Runs = game:GetService"RunService"
@@ -159,7 +157,6 @@ if not Runs:IsClient() then -- Server :
 	local serverBridges = {}
 	local clientBridges = {}
 
-
 	local loadedPlayers = {}
 	local connectionsToClientEnvironment = {}
 
@@ -167,12 +164,17 @@ if not Runs:IsClient() then -- Server :
 		local pInfo = loadedPlayers[player]
 
 		local s = tick()
+		local _notified = false
 
-		while not pInfo and (tick() - s < WAIT_TIMEOUT) do
+		while not pInfo do
+			if not _notified and (tick() - s > 10) then _notified = true warn(player.Name .. " may never load") end
+			
 			pInfo = loadedPlayers[player]
 
 			wait()
 		end
+
+		if not pInfo then warn("No player info for " .. player.Name) end
 
 		return pInfo
 	end
@@ -204,8 +206,49 @@ if not Runs:IsClient() then -- Server :
 	end
 
 	local metaData = {}
+	local _globalEnvTypes = {}
+	
+	-- It's assumed that a universal environment will exist forever.
+	function SLEnvironment:CreateUniversal(envType, iniT : table ?)
+		local accessSignal = Signal.new()
+
+		local pL = getProxyListener(iniT, accessSignal)
+
+		do
+			local envUpdatedEvent = getServerEnv(envType)
+
+			accessSignal:Connect(function(dataPath, key, value)
+				envUpdatedEvent:FireAll(dataPath, key, value)
+			end)
+		end
+
+		assert(not serverOwnedEnvironments[envType], "Universal environment must not share an Environment Type")
+		assert(not _globalEnvTypes[envType], "Universal environment must not share an Environment Type")
+
+		_globalEnvTypes[envType] = true
+
+		metaData[pL] = {
+			Type = envType,
+			Signal = accessSignal
+		}
+		
+		Players.PlayerAdded:Connect(function(player)
+			WaitForPlayerLoaded(player)
+			createdServerEvent:FireClient(player, envType, pL._true)
+		end)
+
+		for index, player in ipairs(Players:GetPlayers()) do
+			WaitForPlayerLoaded(player)
+
+			createdServerEvent:FireClient(player, envType, pL._true)
+		end
+
+		return pL
+	end
 
 	function SLEnvironment:CreateServerHost(envType, iniT : table ?)
+		assert(not _globalEnvTypes[envType], "Universal environment must not share an Environment Type")
+
 		local Subscribers = {}
 
 		local accessSignal = Signal.new()
@@ -256,7 +299,7 @@ if not Runs:IsClient() then -- Server :
 	local _cEventConns = {}
 
 	function SLEnvironment:CreateClientHost(player, envType, iniT : table ?)
-		if not WaitForPlayerLoaded(player) then	return warn(player.Name .. " failed to load in time") end
+		WaitForPlayerLoaded(player)
 
 		local tClone = DeepCopy(iniT)
 
@@ -328,10 +371,6 @@ if not Runs:IsClient() then -- Server :
 
 	function SLEnvironment:Subscribe(remoteEnvironment, player)
 		local pInfo = WaitForPlayerLoaded(player)
-
-		if not pInfo then
-			return warn(player.Name .. " failed to load in time")
-		end
 
 		local remEnvMeta = metaData[remoteEnvironment]
 
