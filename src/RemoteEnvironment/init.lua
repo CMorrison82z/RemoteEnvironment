@@ -195,9 +195,51 @@ if not Runs:IsClient() then -- Server :
 		end
 	end
 
+	
 	local metaData = {}
+	local _globalEnvTypes = {}
+	
+	-- It's assumed that a universal environment will exist forever.
+	function SLEnvironment:CreateUniversal(envType, iniT : table ?)
+		local accessSignal = Signal.new()
+
+		local pL = getProxyListener(iniT, accessSignal)
+
+		do
+			local envUpdatedEvent = getServerEnv(envType)
+
+			accessSignal:Connect(function(dataPath, key, value)
+				envUpdatedEvent:FireAllClients(dataPath, key, value)
+			end)
+		end
+
+		assert(not serverOwnedEnvironments[envType], "Universal environment must not share an Environment Type")
+		assert(not _globalEnvTypes[envType], "Universal environment must not share an Environment Type")
+
+		_globalEnvTypes[envType] = true
+
+		metaData[pL] = {
+			Type = envType,
+			Signal = accessSignal
+		}
+		
+		Players.PlayerAdded:Connect(function(player)
+			WaitForPlayerLoaded(player)
+			createdServerEvent:FireClient(player, envType, pL._true)
+		end)
+
+		for index, player in ipairs(Players:GetPlayers()) do
+			WaitForPlayerLoaded(player)
+
+			createdServerEvent:FireClient(player, envType, pL._true)
+		end
+
+		return pL
+	end
 
 	function SLEnvironment:CreateServerHost(envType, iniT : table ?)
+		assert(not _globalEnvTypes[envType], "Universal environment must not share an Environment Type")
+
 		local Subscribers = {}
 
 		local accessSignal = Signal.new()
@@ -248,7 +290,7 @@ if not Runs:IsClient() then -- Server :
 	local _cEventConns = {}
 
 	function SLEnvironment:CreateClientHost(player, envType, iniT : table ?)
-		if not WaitForPlayerLoaded(player) then	return warn(player.Name .. " failed to load in time") end
+		WaitForPlayerLoaded(player)
 
 		local tClone = DeepCopy(iniT)
 
@@ -321,10 +363,6 @@ if not Runs:IsClient() then -- Server :
 	function SLEnvironment:Subscribe(remoteEnvironment, player)
 		local pInfo = WaitForPlayerLoaded(player)
 
-		if not pInfo then
-			return warn(player.Name .. " failed to load in time")
-		end
-
 		local remEnvMeta = metaData[remoteEnvironment]
 
 		if table.find(remEnvMeta.Subscribers, player) then warn(player, "already subscribed to an environment of type", remEnvMeta.Type) end
@@ -341,6 +379,12 @@ if not Runs:IsClient() then -- Server :
 
 		removedServerEvent:FireClient(player, remEnvMeta.Type)
 	end
+
+	LoadedEvent.OnServerEvent:Connect(function(player)
+		clientOwnedEnvironments[player] = {}
+
+		loadedPlayers[player] = true
+	end)
 
 	LoadedEvent.OnServerEvent:Connect(function(player)
 		clientOwnedEnvironments[player] = {}
