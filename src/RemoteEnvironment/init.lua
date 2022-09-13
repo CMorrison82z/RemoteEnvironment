@@ -76,16 +76,25 @@ local function getProxyListener(t, accessSignal : BindableEvent, keyNamePath : s
 	local prox = newproxy(true)
 	local proxMeta = getmetatable(prox)
 
+	local specialKeys = {
+		_true = function()
+			return t
+		end,
+		_signal = function()
+			return accessSignal
+		end
+	}
+
 	proxMeta.__index = function(self, k)
 		local val = t[k]
 
 		if val == nil then
-			local interpretedKey = k:gsub("_", "")
+			local sKfunc = specialKeys[k]
 
-			if interpretedKey == "true" then
-				return t
+			if sKfunc then
+				return sKfunc()
 			else
-				return t[interpretedKey]
+				return val
 			end
 		end		
 
