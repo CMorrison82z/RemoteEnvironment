@@ -140,20 +140,6 @@ local function getProxyListener(t, accessSignal : BindableEvent, keyNamePath : s
 end
 
 if not Runs:IsClient() then -- Server :
-	BridgeNet.Start({ -- server
-		[BridgeNet.DefaultReceive] = 60,
-		[BridgeNet.DefaultSend] = 60,
-		[BridgeNet.SendLogFunction] = function(remote, plrs, ...) 
-			local args = table.pack(...)
-			print(remote, plrs, args)
-		end,
-		[BridgeNet.ReceiveLogFunction] = function(remote, plr, ...)
-			print(remote, plr, ...)
-		end,
-	})
-
-	
-
 	local serverOwnedEnvironments = {}
 	local clientOwnedEnvironments = {}
 
@@ -437,18 +423,6 @@ if not Runs:IsClient() then -- Server :
 		loadedPlayers[player] = nil
 	end)
 else -- Client :
-	BridgeNet.Start({ -- server
-		[BridgeNet.DefaultReceive] = 60,
-		[BridgeNet.DefaultSend] = 60,
-		[BridgeNet.SendLogFunction] = function(remote, plrs, ...) 
-			local args = table.pack(...)
-			print(remote, plrs, args)
-		end,
-		[BridgeNet.ReceiveLogFunction] = function(remote, plr, ...)
-			print(remote, plr, ...)
-		end,
-	})
-
 	local serverOwnedEnvironments = {}
 	local clientOwnedEnvironments = {}
 
