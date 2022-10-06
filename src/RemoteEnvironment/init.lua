@@ -109,7 +109,7 @@ local function getProxyListener(t, accessSignal : BindableEvent, keyNamePath : s
 		if (type(v) == "function") then error("Cannot assign a table or function") end
 
 		if (type(v) == "table") then
-			assert(getmetatable(v), "Cannot assign a table with a metatable.")
+			assert(not getmetatable(v), "Cannot assign a table with a metatable.")
 			warn("Table is evolving")
 
 			-- Clone table for use in the proxy table.
