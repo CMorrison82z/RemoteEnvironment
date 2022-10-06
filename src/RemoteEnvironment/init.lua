@@ -105,8 +105,22 @@ local function getProxyListener(t, accessSignal : BindableEvent, keyNamePath : s
 	end
 
 	proxMeta.__newindex = function(self, k, v)
-		if (type(v) == "table") then warn("Reminder : table was assigned to proxy listener at '" .. tostring(k) .. "'. Modifications directly made to the table will not be tracked ! To track changes to this table, retrieve a new reference by obtaining it from the proxy listener") end
 		if (type(v) == "function") then error("Cannot assign a table or function") end
+
+		if (type(v) == "table") then
+			assert(getmetatable(v), "Cannot assign a table with a metatable.")
+			warn("Table is evolving")
+
+			-- Clone table for use in the proxy table.
+			local cT = table.clone(v)
+			
+			-- Clear contents of the old table and turn it into another proxy.
+			table.clear(v)
+			setmetatable(v, proxMeta)
+
+			-- set v to the cloned table so that it is assigned and fired correctly by the signal.
+			v = cT
+		end
 
 		t[k] = v
 
