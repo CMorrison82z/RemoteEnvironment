@@ -24,6 +24,7 @@ local BridgeNet = require(script.BridgeNet)
 local Signal = require(script.Signal)
 
 local ENVIRONMENT_TYPES = {
+	Universal = "Universal",
 	Server = "Server",
 	Client = "Client"
 }
@@ -232,41 +233,40 @@ if not Runs:IsClient() then -- Server :
 	local _globalEnvTypes = {}
 	
 	-- It's assumed that a universal environment will exist forever.
-	function SLEnvironment:CreateUniversal(envType, iniT : table ?)
+	do
 		local accessSignal = Signal.new()
 
-		local pL = getProxyListener(iniT, accessSignal)
+		local pL = getProxyListener({}, accessSignal)
+		SLEnvironment.Environments.Universal = pL
 
 		do
-			local envUpdatedEvent = getServerEnv(envType)
+			local envUpdatedEvent = getServerEnv(ENVIRONMENT_TYPES.Universal)
 
 			accessSignal:Connect(function(dataPath, key, value)
 				envUpdatedEvent:FireAll(dataPath, key, value)
 			end)
 		end
 
-		assert(not serverOwnedEnvironments[envType], "Universal environment must not share an Environment Type")
-		assert(not _globalEnvTypes[envType], "Universal environment must not share an Environment Type")
+		assert(not serverOwnedEnvironments[ENVIRONMENT_TYPES.Universal], "Universal environment must not share an Environment Type")
+		assert(not _globalEnvTypes[ENVIRONMENT_TYPES.Universal], "Universal environment must not share an Environment Type")
 
-		_globalEnvTypes[envType] = true
+		_globalEnvTypes[ENVIRONMENT_TYPES.Universal] = true
 
 		metaData[pL] = {
-			Type = envType,
+			Type = ENVIRONMENT_TYPES.Universal,
 			Signal = accessSignal
 		}
 		
 		Players.PlayerAdded:Connect(function(player)
 			WaitForPlayerLoaded(player)
-			createdServerEvent:FireClient(player, envType, pL._true)
+			createdServerEvent:FireClient(player, ENVIRONMENT_TYPES.Universal, pL._true)
 		end)
 
 		for index, player in ipairs(Players:GetPlayers()) do
 			WaitForPlayerLoaded(player)
 
-			createdServerEvent:FireClient(player, envType, pL._true)
+			createdServerEvent:FireClient(player, ENVIRONMENT_TYPES.Universal, pL._true)
 		end
-
-		return pL
 	end
 
 	function SLEnvironment:CreateServerHost(envType, iniT : table ?)
