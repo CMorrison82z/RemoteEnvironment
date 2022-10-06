@@ -440,7 +440,7 @@ else -- Client :
 		if thisEnv then 
 			return thisEnv 
 		else		
-			local newBridge = BridgeNet.WaitForBridge(name)
+			local newBridge = BridgeNet.CreateBridge(name)
 			serverClientBridges[name] = newBridge
 
 			return newBridge
@@ -453,7 +453,7 @@ else -- Client :
 		if thisEnv then 
 			return thisEnv 
 		else		
-			local newBridge = BridgeNet.WaitForBridge(name)
+			local newBridge = BridgeNet.CreateBridge(name)
 			clientServerBridges[name] = newBridge
 
 			return newBridge
