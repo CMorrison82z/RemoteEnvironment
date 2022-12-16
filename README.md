@@ -6,6 +6,21 @@ Facilitates shared tables between server and client. Creation of a RemoteEnviron
 
 Currently in very early stages, and minor care was taken for upholding standard styling practices, in favor of laying out a roughdraft quickly.
 
+## Universal
+
+The universal environment is created automatically and is immediately ready for use via:
+```lua
+-- Server : 
+local universalEnv = require(RemoteEnvironment).Environments.Universal
+
+-- Client : 
+
+-- Note that for the client, it looks like just another regular ServerEnvironment, just with a special reserved name.
+local serviceRemoteEnvironment = RemoteEnvironment:WaitForServer(RemoteEnvironment.Types.Universal)
+
+local _connection = RemoteEnvironment:ConnectToEnvironmentPath(RemoteEnvironment.Types.Universal, keyPath, func)
+```
+
 ## Knit
 
 ```lua

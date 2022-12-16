@@ -1,25 +1,124 @@
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+--!strict
 local RunService = game:GetService("RunService")
 
 local SerdesLayer = require(script.SerdesLayer)
 local ServerBridge = require(script.ServerBridge)
 local ClientBridge = require(script.ClientBridge)
+local CreateBridgeTree = require(script.CreateBridgeTree)
+local Bridge = require(script.Bridge)
 
 local isServer = RunService:IsServer()
-local hasStarted = false
-
-type ClientBridgeDictionary = {
-	[string]: ClientBridge.ClientObject,
-}
-
-type ServerBridgeDictionary = {
-	[string]: ServerBridge.ServerObject,
-}
 
 --[=[
 	@class BridgeNet
 	
-	The interface for the package.
+	The interface for the library.
+]=]
+
+--[=[
+	@function GetQueue
+	@within BridgeNet
+	
+	Returns the internal queue BridgeNet uses. Not intended for production purposes- use this to debug potential issues with the module, or your own code.
+	
+	@return SendQueue, ReceiveQueue
+]=]
+
+--[=[
+	@function Identifiers
+	@within BridgeNet
+	
+	
+	
+	@return { [string]: string }
+]=]
+
+--[=[
+	@function CreateBridgeTree
+	@within BridgeNet
+	
+	This function creates a series of Bridges with a preset configuration. This function supports namespaces- it takes either a BridgeNet.Bridge() function, or a dictionary.
+	```lua
+	local MyBridgeTree = BridgeNet.CreateBridgeTree({
+		BridgeNameHere = BridgeNet.Bridge()
+		NamespaceHere = {
+			BridgeHere = BridgeNet.Bridge({
+				ReplicationRate = 20
+			})
+		}
+	})
+	```
+	This allows you to create your Bridge objects in one centralized place, as it is runnable on both the client and server. This means that one module can contain all of your
+	Bridge objects- which makes it much easier to access. Example usage:
+	```lua
+	-- shared/Bridges.luau
+	local MyBridgeTree = BridgeNet.CreateBridgeTree({
+		PrintOnServer = BridgeNet.Bridge()
+	})
+	
+	return MyBridgeTree
+	
+	-- client
+	local Bridges = require(path.to.Bridges)
+	
+	Bridges.PrintOnServer:Fire("Hello, world!")
+	
+	-- server
+	local Bridges = require(path.to.Bridges)
+	
+	Bridges.PrintOnServer:Connect(function(player, text)
+		print("Player " .. player.Name .. " has said " .. text) -- prints "Player SomeUsername has said Hello, world!
+	end)
+	```
+	
+	@param BridgeTree { [string]: thisType | BridgeConfig }
+	@return { [string]: thisType | Bridge }
+]=]
+
+--[=[
+	@function Bridge
+	@within BridgeNet
+	
+	This function is only intended for usage within BridgeNet.CreateBridgeTree(). You are not supposed to use this anywhere else.
+	This function lets you assign middleware, a replication rate, and in the future certain things like logging and typechecking.
+	
+	```lua
+		local MyBridgeTree = BridgeNet.CreateBridgeTree({
+			Print = BridgeNet.Bridge({
+				ReplicationRate = 20, -- twenty times per second
+				Server = {
+					OutboundMiddleware = {
+						function(...)
+							print("Telling the client to print...")
+							return ...
+						end,
+					},
+					InboundMiddleware = {
+						function(plr, ...)
+							print("Player " .. plr.Name .. " has fired PrintOnServer")
+							return ...
+						end,
+					},
+				},
+				Client = {
+					OutboundMiddleware = {
+						function(...)
+							print("Telling the server to print...")
+							return ...
+						end,
+					},
+					InboundMiddleware = {
+						function(plr, ...)
+							print("The server has told us to print")
+							return ...
+						end,
+					},
+				}
+			})
+		})
+	```
+	
+	@return BridgeConfig
 ]=]
 
 --[=[
@@ -37,46 +136,10 @@ type ServerBridgeDictionary = {
 	@return ServerBridge | ClientBridge
 ]=]
 
---[=[
-	@function Start
-	@within BridgeNet
-	
-	This function starts BridgeNet. It must be called on both the client and server.
-		
-	All possible parameters:
-		- DefaultReceive (BridgeNet.DefaultReceive) sets the rate of which incoming data is handled. Defaults to 60 hz
-		- DefaultSend (BridgeNet.DefaultSend) sets the rate of which outgoing data is sent. Defaults to 60 hz
-		- SendLogFunction (BridgeNet.SendLogFunction) sets the custom logging function for all outgoing data. Default is none [UNSTABLE]
-		- ReceiveLogFunction (BridgeNet.ReceiveLogFunction) sets the custom logging function for all incoming data. Default is none [UNSTABLE]
-	```lua
-		BridgeNet.Start({ -- server
-			[BridgeNet.DefaultReceive] = 60,
-			[BridgeNet.DefaultSend] = 60,
-			[SendLogFunction] = function(remote, plrs, ...) 
-				local args = table.pack(...)
-				print(remote, plrs, args)
-			end,
-			[ReceiveLogFunction] = function(remote, plr, ...)
-				print(remote, plr, args)
-			end,
-		})
-	```
-	
-	@param options {}
-	@return nil
-]=]
+export type ServerBridge = ServerBridge.ServerObject
+export type ClientBridge = ClientBridge.ClientObject
 
-local DefaultReceive = require(script.ConfigSymbols.DefaultReceive)
-local DefaultSend = require(script.ConfigSymbols.DefaultSend)
-local SendLogFunction = require(script.ConfigSymbols.SendLogFunction)
-local ReceiveLogFunction = require(script.ConfigSymbols.ReceiveLogFunction)
-local Signal = require(script.Parent.GoodSignal)
-local Declare = require(script.Declare)
-local Start = require(script.Start)
-local Identifiers = require(script.Identifiers)
-local Bridge = require(script.Bridge)
-
-local Started = Signal.new()
+export type Bridge = ServerBridge | ClientBridge
 
 script.Destroying:Connect(function()
 	SerdesLayer._destroy()
@@ -85,10 +148,26 @@ script.Destroying:Connect(function()
 	end
 end)
 
+SerdesLayer._start()
+if isServer then
+	ServerBridge._start()
+else
+	ClientBridge._start()
+end
+
 return {
-	Declare = Declare,
+	CreateBridgeTree = CreateBridgeTree,
 	Bridge = Bridge,
-	Identifiers = Identifiers,
+
+	Identifiers = function(tbl: { string })
+		local ReturnValue = {}
+
+		for _, v in tbl do
+			ReturnValue[v] = SerdesLayer.CreateIdentifier(v)
+		end
+
+		return ReturnValue :: { [string]: string }
+	end,
 
 	CreateIdentifier = SerdesLayer.CreateIdentifier,
 	DestroyIdentifier = SerdesLayer.DestroyIdentifier,
@@ -99,27 +178,29 @@ return {
 
 	DictionaryToTable = SerdesLayer.DictionaryToTable,
 
-	Started = Started,
+	--[[LogNetTraffic = function(duration: number)
+		if isServer then
+			return ServerBridge._log(duration)
+		else
+			return ClientBridge._log(duration)
+		end
+	end,]]
 
-	SendLogFunction = SendLogFunction,
-	ReceiveLogFunction = ReceiveLogFunction,
-	DefaultReceive = DefaultReceive,
-	DefaultSend = DefaultSend,
+	GetQueue = function()
+		if isServer then
+			local send, receive = ServerBridge._returnQueue()
+			return send, receive
+		else
+			local send, receive = ClientBridge._returnQueue()
+			return send, receive
+		end
+	end,
 
 	CreateBridge = function(str)
-		if not hasStarted then
-			Started:Wait()
-		end
 		if isServer then
 			return ServerBridge.new(str)
 		else
 			return ClientBridge.new(str)
-		end
-	end,
-	Start = function(config: { [any]: number | () -> any })
-		if Start(config) then
-			Started:Fire()
-			hasStarted = true
 		end
 	end,
 }

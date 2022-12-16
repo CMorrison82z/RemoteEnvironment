@@ -3,36 +3,108 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 
 local SerdesLayer = require(script.Parent.SerdesLayer)
-local Signal = require(script.Parent.Parent.GoodSignal)
 
-type queueSendPacket = { plrs: string | Player | { Player }, remote: string, args: { any } }
+type queueSendPacket = {
+	plrs: string | Player | { Player },
+	remote: string,
+	args: { any },
+	replRate: number,
+	invokeReply: any?,
+	uuid: string?,
+}
 type queueReceivePacket = { plr: Player, remote: string, args: { any } }
-type config = {
-	send_default_rate: number,
-	receive_default_rate: number,
-	--one_remote_event: boolean,
-}
-type logEntry = {
-	Remote: Player,
-}
+
+local FromCompressed = SerdesLayer.FromCompressed
 
 local SendQueue: { queueSendPacket } = {}
 local ReceiveQueue: { queueReceivePacket } = {}
-
 local BridgeObjects = {}
-
-local lastSend: number = 0
-local lastReceive: number = 0
-
 local RemoteEvent
-
 local Invoke
 local InvokeReply
+local freeThread
 
-local activeConfig
+local function functionPasser(fn, ...)
+	fn(...)
+end
 
-local InternalError = Signal.new()
-local ExceededTimeLimit = Signal.new()
+local function yielder()
+	while true do
+		functionPasser(coroutine.yield())
+	end
+end
+
+local function maybeSpawn(fn, ...)
+	if not freeThread then
+		freeThread = coroutine.create(yielder)
+		coroutine.resume(freeThread)
+	end
+	local acquiredThread = freeThread
+	freeThread = nil
+	task.spawn(acquiredThread, fn, ...)
+	freeThread = acquiredThread
+end
+
+local function spawnConnection(obj, v, callback)
+	local result
+	for _, func in obj._inboundMiddleware do
+		if result then
+			local potential = { func(v.plr, table.unpack(result)) }
+			if potential[1] == nil then
+				return
+			end
+			result = potential
+		else
+			result = { func(v.plr, table.unpack(v.args)) }
+		end
+	end
+
+	result = result or v.args
+
+	callback(v.plr, table.unpack(result))
+end
+
+local function spawnConnectionWithNil(obj, v, callback, argCount)
+	local result
+	for _, func in obj._inboundMiddleware do
+		if result then
+			local potential = { func(v.plr, table.unpack(result), 1, argCount) }
+			if potential[1] == nil then
+				return
+			end
+			result = potential
+		else
+			result = { func(v.plr, table.unpack(v.args, 1, argCount)) }
+		end
+	end
+
+	result = result or v.args
+
+	callback(v.plr, table.unpack(result))
+end
+
+local function spawnConnectionWithoutMiddleware(callback, v)
+	callback(v.plr, table.unpack(v.args))
+end
+
+local function spawnConnectionWithoutMiddlewareWithNil(callback, v, argCount)
+	callback(v.plr, table.unpack(v.args, 1, argCount))
+end
+
+local function deepCopy<originalType>(tbl): originalType
+	local result: originalType = {}
+	for key: number, v in tbl do
+		if typeof(v) == "table" then
+			result[key] = deepCopy(v)
+		elseif typeof(v) == "userdata" then
+			warn("warning: copying userdata? you should never see this.")
+			result[key] = v
+		else
+			result[key] = v
+		end
+	end
+	return result
+end
 
 --[=[
 	@class ServerBridge
@@ -45,12 +117,9 @@ ServerBridge.__index = ServerBridge
 --[=[
 	Starts the internal processes for ServerBridge.
 	
-	@param config dictionary
 	@ignore
 ]=]
-function ServerBridge._start(config: config): nil
-	activeConfig = config
-
+function ServerBridge._start(): nil
 	RemoteEvent = Instance.new("RemoteEvent")
 	RemoteEvent.Name = "RemoteEvent"
 	RemoteEvent.Parent = ReplicatedStorage
@@ -58,9 +127,11 @@ function ServerBridge._start(config: config): nil
 	Invoke = SerdesLayer.CreateIdentifier("Invoke")
 	InvokeReply = SerdesLayer.CreateIdentifier("InvokeReply")
 
+	local replTicks = {}
+
 	RunService.Heartbeat:Connect(function()
 		debug.profilebegin("ServerBridge")
-		local start = os.clock()
+		local currentTime = os.clock()
 
 		--[[if (time() - lastClear) > 60 then
 			lastClear = time()
@@ -70,24 +141,24 @@ function ServerBridge._start(config: config): nil
 			end
 		end]]
 
-		lastReceive = time()
 		for _, v in ReceiveQueue do
+			local args = v.args
 			for i = 1, #v.args do
 				if v.args[i] == SerdesLayer.NilIdentifier then
 					v.args[i] = nil
 				end
 			end
 
-			local obj = BridgeObjects[SerdesLayer.FromCompressed(v.remote)]
+			local obj = BridgeObjects[FromCompressed(v.remote)]
 			if obj == nil then
-				--Don't warn here because that's a vulnerability. We don't want exploiters
-				--lagging out the server over time with a pcall that warns every frame.
 				continue
 			end
+
+			local allowsNil = obj._allowsNil
+
 			if v.args[1] == Invoke then
 				if obj._onInvoke ~= nil then
 					task.spawn(function()
-						local args = v.args
 						local uuid = args[2]
 
 						table.remove(args, 1)
@@ -97,12 +168,12 @@ function ServerBridge._start(config: config): nil
 							remote = obj._id,
 							uuid = uuid,
 							invokeReply = true,
+							replRate = 60,
 							args = { obj._onInvoke(v.plr, unpack(v.args)) },
 						})
 					end)
 				else
-					-- onInvoke is not set s	end an error to the client
-					local args = v.args
+					-- onInvoke is not set, send an error to the client
 					local uuid = args[2]
 
 					table.remove(args, 1)
@@ -112,69 +183,102 @@ function ServerBridge._start(config: config): nil
 						remote = obj._id,
 						uuid = uuid,
 						invokeReply = true,
+						replRate = 60,
 						args = { "err", "onInvoke has not yet been registered on the server for " .. obj._name },
 					})
 				end
-			else
-				debug.profilebegin(string.format("connections_%s", obj._name))
-				if activeConfig.receive_logging ~= nil then
-					activeConfig.receive_logging(v.plr, unpack(v.args))
-				end
+				continue
+			end
 
-				for callback, timesConnected in obj._connections do
-					-- Spawn a thread to be yield-safe. Potentially implement thread reusability for optimization later?
-					-- also for error protection
-					for _ = 1, timesConnected do
-						task.spawn(function()
-							local result
-							for _, func in obj._middlewareFunctions do
-								if result then
-									local potential = { func(table.unpack(result)) }
-									if #potential == 0 then
-										continue
-									end
-									result = potential
-								else
-									result = { func(table.unpack(v.args)) }
-								end
-							end
-
-							if result == nil then
-								result = v.args
-							end
-
-							callback(v.plr, table.unpack(result))
-						end)
+			if #obj._inboundMiddleware == 0 then
+				if allowsNil then
+					for _, callback in obj._connections do
+						maybeSpawn(spawnConnection, obj, v, callback)
+					end
+				else
+					for _, callback in obj._connections do
+						maybeSpawn(spawnConnectionWithNil, obj, v, callback)
 					end
 				end
-				debug.profileend()
+			else
+				if allowsNil then
+					for _, callback in obj._connections do
+						spawnConnectionWithoutMiddleware(callback, v)
+					end
+				else
+					for _, callback in obj._connections do
+						spawnConnectionWithoutMiddlewareWithNil(callback, v)
+					end
+				end
 			end
 		end
-		table.clear(ReceiveQueue)
 
-		lastSend = time()
+		table.clear(ReceiveQueue)
 
 		local toSendAll = {}
 		local toSendPlayers = {}
-		for _, v in SendQueue do
+		local remainingQueue = {}
+		local passingReplRates = {}
+
+		for i, v in remainingQueue do
+			if (currentTime - replTicks[v.replRate]) <= (1 / v.replRate - 0.003) then
+				table.insert(SendQueue, v)
+				continue
+			else
+				table.remove(remainingQueue, i)
+			end
+		end
+
+		for _, v: queueSendPacket in SendQueue do
+			if replTicks[v.replRate] then
+				-- subtract 0.003 to make sure we don't accidentally skip any frames due to rounding errors
+				if (currentTime - replTicks[v.replRate]) <= (1 / v.replRate - 0.003) then
+					passingReplRates[v.replRate] = true
+					if not passingReplRates[v.replRate] then
+						table.insert(remainingQueue, v)
+						continue
+					end
+				end
+			end
+
 			for i = 1, #v.args do
 				if v.args[i] == nil then
 					v.args[i] = SerdesLayer.NilIdentifier
 				end
 			end
 
-			if activeConfig.send_function ~= nil then
-				activeConfig.send_function(SerdesLayer.FromCompressed(v.remote), v.plrs, table.unpack(v.args))
-			end
-
 			if not v.invokeReply then
-				if v.plrs == "all" then
-					local tbl = { v.remote }
+				local tbl = { v.remote }
+				local bridgeObj = BridgeObjects[SerdesLayer.FromCompressed(v.remote)]
 
+				if not (#bridgeObj._outboundMiddleware == 0) then
+					local result
+					for _, func in bridgeObj._outboundMiddleware do
+						if result then
+							local potential = { func(table.unpack(result)) }
+							if #potential == 0 then
+								continue
+							end
+							result = potential
+						else
+							result = { func(table.unpack(v.args)) }
+						end
+					end
+
+					if result == nil then
+						result = v.args
+					end
+
+					for _, k in result do
+						table.insert(tbl, k)
+					end
+				else
 					for _, k in v.args do
 						table.insert(tbl, k)
 					end
+				end
 
+				if v.plrs == "all" then
 					table.insert(toSendAll, tbl)
 				elseif typeof(v.plrs) == "table" then
 					for _, l in v.plrs do
@@ -182,26 +286,14 @@ function ServerBridge._start(config: config): nil
 							toSendPlayers[l] = {}
 						end
 
-						local tbl = { v.remote }
-
-						for _, m in v.args do
-							table.insert(tbl, m)
-						end
-
 						table.insert(toSendPlayers[l], tbl)
 					end
 				else
 					if toSendPlayers[v.plrs] == nil then
-						toSendPlayers[v.plrs] = {}
+						toSendPlayers[v.plrs] = { tbl }
+					else
+						table.insert(toSendPlayers[v.plrs], tbl)
 					end
-
-					local tbl = { v.remote }
-
-					for _, n in v.args do
-						table.insert(tbl, n)
-					end
-
-					table.insert(toSendPlayers[v.plrs], tbl)
 				end
 			elseif v.invokeReply then
 				if toSendPlayers[v.plrs] == nil then
@@ -221,13 +313,14 @@ function ServerBridge._start(config: config): nil
 		if #toSendAll ~= 0 then
 			RemoteEvent:FireAllClients(toSendAll)
 		end
-		for l, k in pairs(toSendPlayers) do
+		for l, k in toSendPlayers do
 			RemoteEvent:FireClient(l, k)
 		end
+
 		table.clear(SendQueue)
 
-		if (time() - start) > 0.0005 then
-			ExceededTimeLimit:Fire(os.clock() - start)
+		for key, _ in passingReplRates do
+			passingReplRates[key] = false
 		end
 
 		debug.profileend()
@@ -250,6 +343,27 @@ function ServerBridge._start(config: config): nil
 	return nil
 end
 
+function ServerBridge._returnQueue()
+	return SendQueue, ReceiveQueue
+end
+
+--[[function ServerBridge._log(duration)
+	if activeLogger ~= nil then
+		return warn("[BridgeNet] active logger already exists")
+	else
+		local returnValue = {}
+		activeLogger = {}
+		task.delay(duration, function()
+			for _, v in activeLogger do
+				table.insert(returnValue, {
+					Name = v.Name,
+				})
+			end
+			activeLogger = nil
+		end)
+	end
+end]]
+
 function ServerBridge._destroy()
 	RemoteEvent:Destroy()
 end
@@ -269,6 +383,8 @@ function ServerBridge.new(remoteName: string)
 	self._onInvoke = nil
 	self._connections = {}
 
+	self._replRate = 60
+
 	self._rateLimit = nil
 	self._rateHandler = nil
 	self._rateInThisMinute = {
@@ -278,7 +394,8 @@ function ServerBridge.new(remoteName: string)
 
 	self._id = SerdesLayer.CreateIdentifier(remoteName)
 
-	self._middlewareFunctions = {}
+	self._outboundMiddleware = {}
+	self._inboundMiddleware = {}
 
 	BridgeObjects[self._name] = self
 	return self
@@ -316,6 +433,7 @@ function ServerBridge:FireTo(plr: Player, ...: any)
 		plrs = plr,
 		remote = self._id,
 		args = args,
+		replRate = self._replRate,
 	}
 	table.insert(SendQueue, toSend)
 end
@@ -384,10 +502,11 @@ function ServerBridge:FireToAllExcept(blacklistedPlrs: Player | { Player }, ...:
 		plrs = toSend,
 		remote = self._id,
 		args = { ... },
+		replRate = self._replRate,
 	}
 	table.insert(SendQueue, toSendPacket)
 
-	return toSend
+	return toSend :: { Player }
 end
 
 --[=[
@@ -440,6 +559,7 @@ function ServerBridge:FireAllInRangeExcept(
 		plrs = toSend,
 		remote = self._id,
 		args = { ... },
+		replRate = self._replRate,
 	}
 	table.insert(SendQueue, toSendPacket)
 
@@ -469,6 +589,9 @@ end
 	@return {Player}
 ]=]
 function ServerBridge:FireAllInRange(point: Vector3, range: number, ...: any): { Player }
+	assert(typeof(point) == "Vector3", "[BridgeNet] point must be a Vector3")
+	assert(typeof(range) == "number", "[BridgeNet] range must be a number")
+
 	local toSend = {}
 	for _, v: Player in Players:GetPlayers() do
 		if v:DistanceFromCharacter(point) <= range then
@@ -480,10 +603,11 @@ function ServerBridge:FireAllInRange(point: Vector3, range: number, ...: any): {
 		plrs = toSend,
 		remote = self._id,
 		args = { ... },
+		replRate = self._replRate,
 	}
 	table.insert(SendQueue, toSendPacket)
 
-	return toSend
+	return toSend :: { Player }
 end
 
 --[=[
@@ -503,6 +627,7 @@ function ServerBridge:FireAll(...: any): nil
 		plrs = "all",
 		remote = self._id,
 		args = args,
+		replRate = self._replRate,
 	}
 	table.insert(SendQueue, toSend)
 	return nil
@@ -528,25 +653,28 @@ function ServerBridge:FireToMultiple(plrs: { Player }, ...: any): nil
 		plrs = plrs,
 		remote = self._id,
 		args = args,
+		replRate = self._replRate,
 	}
 	table.insert(SendQueue, toSend)
 	return nil
 end
 
 --[=[
-	Sets the Bridge's middleware functions. Any function which returns nil will drop the remote request completely. Overrides existing middleware.
+	Sets the Bridge's inbound middleware functions. Any function which returns nil will drop the remote request completely. Overrides existing middleware.
 	
 	Allows you to change arguments or drop remote calls.
+	
+	A more comprehensive guide on middleware will be coming soon.
 	```lua
-	Object:SetMiddleware({
-		function(...) -- Called first
+	Object:SetInboundMiddleware({
+		function(plr, ...) -- Called first
 			return ...
 		end,
-		function(...) -- Called second
+		function(plr, ...) -- Called second
 			print("1")
 			return ...
 		end,
-		function(...) -- Called third
+		function(plr, ...) -- Called third
 			print("2")
 			return ...
 		end,
@@ -556,24 +684,37 @@ end
 	@param middlewareTable { (...any) -> nil }
 	@return nil
 ]=]
-function ServerBridge:SetMiddleware(middlewareTable: { (...any) -> nil })
-	self._middlewareFunctions = middlewareTable
+function ServerBridge:SetInboundMiddleware(middlewareTable: { (...any) -> nil })
+	assert(typeof(middlewareTable) == "table", "[BridgeNet] middlewareTable must be a table")
+	self._inboundMiddleware = middlewareTable or {}
 end
 
 --[=[
-	Inserts a function into the bridge's middleware table.
+	Sets the Bridge's outbound middleware functions. Any function which returns nil will drop the sequence completely. Overrides existing middleware.
 	
+	A more comprehensive guide on middleware will be coming soon.
 	```lua
-	Object:AddMiddleware(function(...) -- Accepts the last middleware function's arguments
-		return ...
-	end)
+	Object:SetOutboundMiddleware({
+		function(plr, ...) -- Called first
+			return ...
+		end,
+		function(plr, ...) -- Called second
+			print("1")
+			return ...
+		end,
+		function(plr, ...) -- Called third
+			print("2")
+			return ...
+		end,
+	})
 	```
 	
-	@param func (...any) -> nil
+	@param middlewareTable { (...any) -> nil }
 	@return nil
 ]=]
-function ServerBridge:AddMiddleware(func: (...any) -> nil)
-	table.insert(self._middlewareFunctions, func)
+function ServerBridge:SetOutboundMiddleware(middlewareTable: { (...any) -> nil })
+	assert(typeof(middlewareTable) == "table", "[BridgeNet] middlewareTable must be a table")
+	self._outboundMiddleware = middlewareTable or {}
 end
 
 --[=[
@@ -616,26 +757,16 @@ end
 	@return Connection
 ]=]
 function ServerBridge:Connect(func: (...any) -> nil)
-	assert(type(func) == "function", "[BridgeNet] Attempt to connect non-function to a Bridge")
-	if self._connections[func] then
-		self._connections[func] += 1
-	else
-		self._connections[func] = 1
-	end
+	assert(type(func) == "function", "[BridgeNet] attempt to connect non-function to a Bridge")
+	local connectionUUID = SerdesLayer.CreateUUID()
+	self._connections[connectionUUID] = func
 
-	local connection
-	connection = {
-		Disconnect = function()
-			if connection.Connected then
-				connection.Connected = false
-				self._connections[func] -= 1
-				if 1 > self._connections[func] then
-					self._connections[func] = nil
-				end
-			end
-		end,
-		Connected = true,
-	}
+	local connection = {}
+
+	function connection.Disconnect()
+		self._connections[connectionUUID] = nil
+		connectionUUID = nil
+	end
 
 	return connection
 end
@@ -656,6 +787,15 @@ function ServerBridge:GetName()
 end
 
 --[=[
+	Sets the rate of which the Bridge sends and receives data.
+	
+	@return nil
+]=]
+function ServerBridge:SetReplicationRate(number)
+	self._replRate = number
+end
+
+--[=[
 	Destroys the identifier, and deletes the object reference.
 	
 	```lua
@@ -670,7 +810,7 @@ end
 function ServerBridge:Destroy()
 	BridgeObjects[self._name] = nil
 	SerdesLayer.DestroyIdentifier(self.Name)
-	for k, v in pairs(self) do
+	for k, v in self do
 		if v.Destroy ~= nil then
 			v:Destroy()
 		else
