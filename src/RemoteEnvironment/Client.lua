@@ -57,7 +57,7 @@ local function callbackTable(t, _callbacks, currentPath)
 
 	local function fireCallbacks(path, v)
 		local currPath = {};
-		
+
 		if _callbacks[""] then
 			local remainingPath = {}
 
@@ -71,11 +71,11 @@ local function callbackTable(t, _callbacks, currentPath)
 				coroutine.wrap(cb)(remainingPath, v)
 			end
 		end
-		
+
 		for i, nextNode in ipairs(path) do
 			table.insert(currPath, nextNode)
 			local cbKey = table.concat(currPath, ".")
-						
+
 			if _callbacks[cbKey] then
 				local remainingPath = {}
 
@@ -135,13 +135,13 @@ local function callbackTable(t, _callbacks, currentPath)
 
 		fireCallbacks(union(currentPath, kPath), v)
 	end
-	
+
 	-- Prepares a path of tables
 	function Methods:Pave(kPath)
 		local head = t
-		
+
 		local cPath = table.clone(currentPath)
-		
+
 		for _, node in kPath do
 			if not head[node] then
 				head[node] = {}
@@ -149,7 +149,7 @@ local function callbackTable(t, _callbacks, currentPath)
 
 				fireCallbacks(cPath, head[node])
 			end
-			
+
 			head = head[node]
 		end
 	end
@@ -161,7 +161,7 @@ local function callbackTable(t, _callbacks, currentPath)
 		for i = 1, #kPath - 1 do
 			head = head[kPath[i]]
 		end
-		
+
 		if atIndex then
 			table.insert(head, v, atIndex)
 		else
@@ -183,7 +183,7 @@ local function callbackTable(t, _callbacks, currentPath)
 	-- Path specifies the location of the Array to perform the remove method.
 	function Methods:ArrayRemove(kPath, atIndex)
 		assert(type(atIndex) == "number", "Must provide an index to remove from.")
-		
+
 		local head = t
 
 		for i = 1, #kPath - 1 do
@@ -217,7 +217,7 @@ local function callbackTable(t, _callbacks, currentPath)
 
 		local hookF = function(modPath, val)
 			_isValid = true
-			
+
 			fireCallbacks(modPath and union(kPath, modPath) or kPath, val)
 		end
 
@@ -260,7 +260,7 @@ local function callbackTable(t, _callbacks, currentPath)
 	function Methods:Hook(f : (kPath : {any}, val : any) -> nil)
 		local cbKey = table.concat(currentPath, ".")
 		local pCallbacks = _callbacks[cbKey]
-		
+
 		if not pCallbacks then
 			pCallbacks = {}
 			_callbacks[cbKey] = pCallbacks
@@ -343,11 +343,11 @@ function SLEnvironment:WaitForClient(envType : string)
 end
 
 function SLEnvironment:ConnectTo(envType : string, func)
-	return getServerEnv(envType):Connect(func)
+	return getServerEnv(envType).OnClientEvent:Connect(func)
 end
 
 function SLEnvironment:ConnectToEnvironmentPath(envType, keyPath, func : (remainingNodes : {string}, value : any) -> nil)
-	return getServerEnv(envType):Connect(function(path, value : any)
+	return getServerEnv(envType).OnClientEvent:Connect(function(path, value : any)
 		for i = #keyPath, 1, -1 do
 			if keyPath[i] ~= path[i] then return end
 
@@ -360,7 +360,7 @@ end
 
 local metaData = {}
 
-script:WaitForChild("CreatedServerEvent").OnClientEvent:Connect(function(envType, iniT)
+script.Parent:WaitForChild("CreatedServerEvent").OnClientEvent:Connect(function(envType, iniT)
 	if serverOwnedEnvironments[envType] then warn(envType, "environment being overwritten") end
 
 	serverOwnedEnvironments[envType] = iniT
@@ -369,8 +369,8 @@ script:WaitForChild("CreatedServerEvent").OnClientEvent:Connect(function(envType
 
 	local thisMeta = {}
 	metaData[envType] = thisMeta
-	
-	thisMeta.Connection = getServerEnv(envType):Connect(function(dataPath, value)
+
+	thisMeta.Connection = getServerEnv(envType).OnClientEvent:Connect(function(dataPath, value)
 		local terminalNode = iniT
 
 		local key; key, dataPath[#dataPath] = dataPath[#dataPath], nil
@@ -386,7 +386,7 @@ script:WaitForChild("CreatedServerEvent").OnClientEvent:Connect(function(envType
 	end)
 end)
 
-script:WaitForChild("RemovedServerEvent").OnClientEvent:Connect(function(envType)
+script.Parent:WaitForChild("RemovedServerEvent").OnClientEvent:Connect(function(envType)
 	if not metaData[envType] then return warn("None", envType) end
 
 	metaData[envType].Connection:Disconnect()
@@ -398,17 +398,19 @@ script:WaitForChild("RemovedServerEvent").OnClientEvent:Connect(function(envType
 	serverOwnedEnvironments[envType] = nil
 end)
 
-script:WaitForChild"CreatedClientEvent".OnClientEvent:Connect(function(envType, iniT)
-	local pL = newCallbackTable(iniT)
-	
+script.Parent:WaitForChild"CreatedClientEvent".OnClientEvent:Connect(function(envType, iniT)
+	local pL = callbackTable(iniT)
+
 	local updatedEvent = getClientEnv(envType)
 
 	pL:Hook(function(dataPath : string, value)
 		updatedEvent:FireServer(dataPath, value)
 	end)
-	
+
 	clientOwnedEnvironments[envType] = pL
-	
+
 end)
 
-script:WaitForChild"Loaded":FireServer()
+script.Parent:WaitForChild"Loaded":FireServer()
+
+return SLEnvironment

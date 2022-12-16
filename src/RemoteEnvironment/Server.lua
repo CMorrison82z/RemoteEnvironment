@@ -75,7 +75,7 @@ local function callbackTable(t, _callbacks, currentPath)
 
 	local function fireCallbacks(path, v)
 		local currPath = {};
-		
+
 		if _callbacks[""] then
 			local remainingPath = {}
 
@@ -89,11 +89,11 @@ local function callbackTable(t, _callbacks, currentPath)
 				coroutine.wrap(cb)(remainingPath, v)
 			end
 		end
-		
+
 		for i, nextNode in ipairs(path) do
 			table.insert(currPath, nextNode)
 			local cbKey = table.concat(currPath, ".")
-						
+
 			if _callbacks[cbKey] then
 				local remainingPath = {}
 
@@ -153,13 +153,13 @@ local function callbackTable(t, _callbacks, currentPath)
 
 		fireCallbacks(union(currentPath, kPath), v)
 	end
-	
+
 	-- Prepares a path of tables
 	function Methods:Pave(kPath)
 		local head = t
-		
+
 		local cPath = table.clone(currentPath)
-		
+
 		for _, node in kPath do
 			if not head[node] then
 				head[node] = {}
@@ -167,7 +167,7 @@ local function callbackTable(t, _callbacks, currentPath)
 
 				fireCallbacks(cPath, head[node])
 			end
-			
+
 			head = head[node]
 		end
 	end
@@ -179,7 +179,7 @@ local function callbackTable(t, _callbacks, currentPath)
 		for i = 1, #kPath - 1 do
 			head = head[kPath[i]]
 		end
-		
+
 		if atIndex then
 			table.insert(head, v, atIndex)
 		else
@@ -201,7 +201,7 @@ local function callbackTable(t, _callbacks, currentPath)
 	-- Path specifies the location of the Array to perform the remove method.
 	function Methods:ArrayRemove(kPath, atIndex)
 		assert(type(atIndex) == "number", "Must provide an index to remove from.")
-		
+
 		local head = t
 
 		for i = 1, #kPath - 1 do
@@ -235,7 +235,7 @@ local function callbackTable(t, _callbacks, currentPath)
 
 		local hookF = function(modPath, val)
 			_isValid = true
-			
+
 			fireCallbacks(modPath and union(kPath, modPath) or kPath, val)
 		end
 
@@ -253,7 +253,7 @@ local function callbackTable(t, _callbacks, currentPath)
 			self = sHookF,
 			other = hookF
 		}
-
+		
 		Methods:Set(kPath, _rawOther)
 
 		Methods:HookPath(kPath, sHookF)
@@ -278,7 +278,7 @@ local function callbackTable(t, _callbacks, currentPath)
 	function Methods:Hook(f : (kPath : {any}, val : any) -> nil)
 		local cbKey = table.concat(currentPath, ".")
 		local pCallbacks = _callbacks[cbKey]
-		
+
 		if not pCallbacks then
 			pCallbacks = {}
 			_callbacks[cbKey] = pCallbacks
@@ -326,7 +326,7 @@ end
 
 local serverOwnedEnvironments = {}
 local clientOwnedEnvironments = {}
-+8
+
 SLEnvironment.Environments = {
 	Server = serverOwnedEnvironments,
 	Client = clientOwnedEnvironments
@@ -334,19 +334,19 @@ SLEnvironment.Environments = {
 
 local LoadedEvent = Instance.new"RemoteEvent"
 LoadedEvent.Name = "Loaded"
-LoadedEvent.Parent = script
+LoadedEvent.Parent = script.Parent
 
 local createdServerEvent = Instance.new"RemoteEvent"
 createdServerEvent.Name = "CreatedServerEvent"
-createdServerEvent.Parent = script
+createdServerEvent.Parent = script.Parent
 
 local removedServerEvent = Instance.new"RemoteEvent"
 removedServerEvent.Name = "RemovedServerEvent"
-removedServerEvent.Parent = script
+removedServerEvent.Parent = script.Parent
 
 local createdClientEvent = Instance.new"RemoteEvent"
 createdClientEvent.Name = "CreatedClientEvent"
-createdClientEvent.Parent = script
+createdClientEvent.Parent = script.Parent
 
 local ServerRemFolder = Instance.new"Folder"
 ServerRemFolder.Parent = script.Parent
@@ -367,7 +367,7 @@ local function WaitForPlayerLoaded(player)
 
 	while not pInfo do
 		if not _notified and (tick() - s > 10) then _notified = true warn(player.Name .. " may never load") end
-		
+
 		pInfo = loadedPlayers[player]
 
 		wait()
@@ -430,7 +430,7 @@ do
 	metaData[pL] = {
 		Type = ENVIRONMENT_TYPES.Universal,
 	}
-	
+
 	Players.PlayerAdded:Connect(function(player)
 		WaitForPlayerLoaded(player)
 		createdServerEvent:FireClient(player, ENVIRONMENT_TYPES.Universal, pL.GetRawSelf())
@@ -529,7 +529,7 @@ function SLEnvironment:CreateClientHost(player, envType, iniT : table ?)
 	if not _cEventConns[envType] then
 		local cachedEnvs = {} -- ! Possible danger of a player disconnecting from server, reconnecting and having their old cache.
 
-		_cEventConns[envType] = getClientEnv(envType):Connect(function(player, dataPath, value)
+		_cEventConns[envType] = getClientEnv(envType).OnServerEvent:Connect(function(player, dataPath, value)
 			local cEnv = cachedEnvs[player]
 
 			if not cEnv then
@@ -561,7 +561,7 @@ function SLEnvironment:CreateClientHost(player, envType, iniT : table ?)
 end
 
 function SLEnvironment:ConnectToClient(player, envType, func)
-	return getClientEnv(envType):Connect(function(firingPlayer, dataPath, value)
+	return getClientEnv(envType).OnServerEvent:Connect(function(firingPlayer, dataPath, value)
 		if player ~= firingPlayer then return end
 
 		func(dataPath, value)
@@ -569,9 +569,9 @@ function SLEnvironment:ConnectToClient(player, envType, func)
 end
 
 function SLEnvironment:ConnectToClientPath(player, envType, keyPath, func : (remainingNodes : {string}, value : any) -> nil)
-	return getClientEnv(envType):Connect(function(firingPlayer, path, value : any)
+	return getClientEnv(envType).OnServerEvent:Connect(function(firingPlayer, path, value : any)
 		if firingPlayer ~= player then return end
-		
+
 		for i = #keyPath, 1, -1 do
 			if keyPath[i] ~= path[i] then return end
 
