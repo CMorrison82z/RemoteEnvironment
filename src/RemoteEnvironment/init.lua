@@ -20,8 +20,6 @@ local RS = game:GetService("ReplicatedStorage")
 local Players = game:GetService"Players"
 local Runs = game:GetService"RunService"
 
-local BridgeNet = require(script.BridgeNet)
-
 local ENVIRONMENT_TYPES = {
 	Universal = "Universal",
 	Server = "Server",
@@ -68,82 +66,168 @@ end
 
 -- recursively sets proxies for table-values in the base table.
 
-export type ProxyTable = {
-	Get : (key : any) -> any,
-	Set : (key : any, value : any) -> nil,
-	Hook : (func : (...any) -> nil) -> nil,
-	HookPath : (path : string, func : (...any) -> nil) -> nil,
-	UnhookPath : (path : string) -> nil,
-	GetRawSelf : () -> table
-}
-
 local function callbackTable(t, _callbacks, currentPath)
 	local p = newproxy(true)
 	local mt = getmetatable(p)
 
-	currentPath = currentPath or "Base"
+	_callbacks = _callbacks or {}
+	currentPath = currentPath or {}
 
 	local function fireCallbacks(path, v)
-		local pathSplit = path:split(".")
+		local currPath = {};
+		
+		if _callbacks[""] then
+			local remainingPath = {}
 
-		local currPath;
+			for thisInd = 1, #path do
+				table.insert(remainingPath, path[thisInd])
+			end
 
-		for i, nextNode in ipairs(pathSplit) do
-			currPath = currPath and currPath .. "." .. nextNode or nextNode
-			
-			if _callbacks[currPath] then
-				local remainingPath = path:gsub(i ~= #pathSplit and currPath .. "." or currPath, "")
-				remainingPath = remainingPath:len() > 0 and remainingPath
+			remainingPath = #remainingPath > 0 and remainingPath
 
-				for _, cb in ipairs(_callbacks[currPath]) do
+			for _, cb in ipairs(_callbacks[""]) do
+				coroutine.wrap(cb)(remainingPath, v)
+			end
+		end
+		
+		for i, nextNode in ipairs(path) do
+			table.insert(currPath, nextNode)
+			local cbKey = table.concat(currPath, ".")
+						
+			if _callbacks[cbKey] then
+				local remainingPath = {}
+
+				for thisInd = i + 1, #path do
+					table.insert(remainingPath, path[thisInd])
+				end
+
+				remainingPath = #remainingPath > 0 and remainingPath
+
+				for _, cb in ipairs(_callbacks[cbKey]) do
 					coroutine.wrap(cb)(remainingPath, v)
 				end
 			end
 		end
 	end
 
+	local function union(a1, a2)
+		local u = table.clone(a1)
+
+		for _, v in a2 do
+			table.insert(u, v)
+		end
+
+		return u
+	end
+
 	local Methods = {}
 	mt.__index = Methods
 
-	function Methods.Get(kPath)
-		local pathSplit = kPath:split(".")
-
+	-- Path is an array of keys.
+	function Methods:Get(kPath)
 		local head = t
 
-		for i = 1, #pathSplit - 1 do
-			head = head[pathSplit[i]]
+		for i = 1, #kPath - 1 do
+			head = head[kPath[i]]
 		end
 
-		local v = head[pathSplit[#pathSplit]]
+		local v = head[kPath[#kPath]]
 		local _typeV = type(v)
 
 		if _typeV == "table" then
-			return callbackTable(v, _callbacks, currentPath .. "." .. kPath)
+			return callbackTable(v, _callbacks, union(currentPath, kPath))
 		else
 			return v
 		end
 	end
 
-	-- path can take the form "Key1.Key2.Keys"
-	function Methods.Set(kPath, v)
-		local pathSplit = kPath:split(".")
-
+	-- path is an array.
+	function Methods:Set(kPath, v)
 		local head = t
 
-		for i = 1, #pathSplit - 1 do
-			head = head[pathSplit[i]]
+		for i = 1, #kPath - 1 do
+			head = head[kPath[i]]
 		end
 
-		head[pathSplit[#pathSplit]] = v
+		head[kPath[#kPath]] = v
 
-		fireCallbacks(currentPath .. "." .. kPath, v)
+		fireCallbacks(union(currentPath, kPath), v)
 	end
 	
+	-- Prepares a path of tables
+	function Methods:Pave(kPath)
+		local head = t
+		
+		local cPath = table.clone(currentPath)
+		
+		for _, node in kPath do
+			if not head[node] then
+				head[node] = {}
+				table.insert(cPath, node)
+
+				fireCallbacks(cPath, head[node])
+			end
+			
+			head = head[node]
+		end
+	end
+
+	-- Path specifies the location of the Array to perform the insert method.
+	function Methods:ArrayInsert(kPath, v, atIndex)
+		local head = t
+
+		for i = 1, #kPath - 1 do
+			head = head[kPath[i]]
+		end
+		
+		if atIndex then
+			table.insert(head, v, atIndex)
+		else
+			table.insert(head, v)
+		end
+
+		local tblPath = union(currentPath, kPath)
+		local pathLenPlusOne = #tblPath + 1
+
+		for thisInd = atIndex or #head, #head do
+			tblPath[pathLenPlusOne] = thisInd
+
+			fireCallbacks(tblPath, head[thisInd])
+
+			tblPath[pathLenPlusOne] = nil
+		end
+	end
+
+	-- Path specifies the location of the Array to perform the remove method.
+	function Methods:ArrayRemove(kPath, atIndex)
+		assert(type(atIndex) == "number", "Must provide an index to remove from.")
+		
+		local head = t
+
+		for i = 1, #kPath - 1 do
+			head = head[kPath[i]]
+		end
+
+		table.remove(head, atIndex)
+
+		local tblPath = union(currentPath, kPath)
+		local pathLenPlusOne = #tblPath + 1
+
+		for thisInd = atIndex or #head, #head do
+			tblPath[pathLenPlusOne] = thisInd
+
+			fireCallbacks(tblPath, head[thisInd])
+
+			tblPath[pathLenPlusOne] = nil
+		end
+	end
+
 	local _nestedHooks = {}
 
 	-- * The child proxy copies its RawSelf into this proxy. However, this proxy is hooked with a function that will error upon attempting to use Set on
 	-- * the path of the child proxy.
-	function Methods.Nest(kPath, otherProxy : ProxyTable)
+	-- * In other words, the nesting ('Parent') is prohibited from modifying the nested ('Child') proxy using its Modification (Set, Insert, etc.) methods.
+	function Methods:Nest(kPath, otherProxy : ProxyTable)
 		assert(not _nestedHooks[otherProxy], "A hook already exists for this proxy! Did you already call Nest on this proxy ?")
 
 		-- Up value for tracking valid modifications.
@@ -152,7 +236,7 @@ local function callbackTable(t, _callbacks, currentPath)
 		local hookF = function(modPath, val)
 			_isValid = true
 			
-			Methods.Set(kPath .. "." .. modPath, val)
+			fireCallbacks(modPath and union(kPath, modPath) or kPath, val)
 		end
 
 		local sHookF = function()
@@ -162,61 +246,62 @@ local function callbackTable(t, _callbacks, currentPath)
 				error("Parent proxy cannot modify inner proxy")
 			end
 		end
-		
+
 		local _rawOther = otherProxy.GetRawSelf()
-		
+
 		_nestedHooks[_rawOther] = {
 			self = sHookF,
 			other = hookF
 		}
-		
-		Methods.Set(kPath, _rawOther)
 
-		Methods.HookPath(kPath, sHookF)
-		otherProxy.Hook(hookF)
+		Methods:Set(kPath, _rawOther)
+
+		Methods:HookPath(kPath, sHookF)
+		otherProxy:Hook(hookF)
 	end
 
-	function Methods.Unnest(kPath, otherProxy)
-		local _nestedT = Methods.Get(kPath).GetRawSelf()
-		
+	function Methods:Unnest(kPath, otherProxy)
+		local _nestedT = Methods:Get(kPath).GetRawSelf()
+
 		assert(_nestedT == otherProxy.GetRawSelf(), "Retrieved table does not match proxy's table.")
-		
+
 		local hooks = _nestedHooks[_nestedT]
 		assert(hooks, "No hook exists for this proxy! Did you already call Unnest for this proxy ?")
 
-		otherProxy.Unhook(nil, hooks.other)
-		Methods.Unhook(kPath, hooks.self)
+		otherProxy:Unhook({}, hooks.other)
+		Methods:Unhook(kPath, hooks.self)
 		_nestedHooks[otherProxy] = nil
-		
-		Methods.Set(kPath)
-	end
-	
-	function Methods.Hook(f : (kPath : string, val : any) -> nil)
-		local pCallbacks = _callbacks[currentPath]
 
+		Methods:Set(kPath)
+	end
+
+	function Methods:Hook(f : (kPath : {any}, val : any) -> nil)
+		local cbKey = table.concat(currentPath, ".")
+		local pCallbacks = _callbacks[cbKey]
+		
 		if not pCallbacks then
 			pCallbacks = {}
-			_callbacks[currentPath] = pCallbacks
+			_callbacks[cbKey] = pCallbacks
 		end
 
 		table.insert(pCallbacks, f)
 	end
-	
-	function Methods.HookPath(path, f : (kPath : string, val : any) -> nil)
-		local _fullPath = currentPath .. "." .. path
-		
+
+	function Methods:HookPath(path, f : (kPath : {any}, val : any) -> nil)
+		local _fullPath = table.concat(union(currentPath, path), ".")
+
 		local pCallbacks = _callbacks[_fullPath]
 
 		if not pCallbacks then
 			pCallbacks = {}
 			_callbacks[_fullPath] = pCallbacks
 		end
-		
+
 		table.insert(pCallbacks, f)
 	end
 
-	function Methods.Unhook(path, f)
-		path = currentPath .. (path and "." .. path or "")
+	function Methods:Unhook(path, f)
+		path = table.concat(union(currentPath, path), ".")
 
 		local pCallbacks = _callbacks[path]
 
@@ -232,7 +317,7 @@ local function callbackTable(t, _callbacks, currentPath)
 		table.remove(pCallbacks, cbInd)
 	end
 
-	function Methods.GetRawSelf()
+	function Methods:GetRawSelf()
 		return t
 	end
 
@@ -246,7 +331,7 @@ end
 if not Runs:IsClient() then -- Server :
 	local serverOwnedEnvironments = {}
 	local clientOwnedEnvironments = {}
-
++8
 	SLEnvironment.Environments = {
 		Server = serverOwnedEnvironments,
 		Client = clientOwnedEnvironments
@@ -299,7 +384,8 @@ if not Runs:IsClient() then -- Server :
 		if thisEnv then 
 			return thisEnv 
 		else		
-			local newBridge = BridgeNet.CreateBridge(name)
+			local newBridge = Instance.new("RemoteEvent")
+
 			serverBridges[name] = newBridge
 
 			return newBridge
@@ -330,7 +416,7 @@ if not Runs:IsClient() then -- Server :
 		do
 			local envUpdatedEvent = getServerEnv(ENVIRONMENT_TYPES.Universal)
 
-			pL.Hook(function(dataPath, value)
+			pL:Hook(function(dataPath, value)
 				envUpdatedEvent:FireAll(dataPath, value)
 			end)
 		end
@@ -366,7 +452,7 @@ if not Runs:IsClient() then -- Server :
 		do
 			local envUpdatedEvent = getServerEnv(envType)
 
-			pL.Hook(function(dataPath, value)
+			pL:Hook(function(dataPath, value)
 				for _, player in ipairs(Subscribers) do
 					envUpdatedEvent:FireTo(player, dataPath, value)
 				end
@@ -454,12 +540,11 @@ if not Runs:IsClient() then -- Server :
 
 				local terminalNode = cEnv
 
-				local theseNodes = dataPath:split"."
-				local key; key, theseNodes[#theseNodes] = theseNodes[#theseNodes], nil
+				local key; key, dataPath[#dataPath] = dataPath[#dataPath], nil
 
 				-- Skip first instead of removing. Removing is an order N operation.
-				for nodeIndex = 1, #theseNodes do
-					terminalNode = terminalNode[theseNodes[nodeIndex]]
+				for nodeIndex = 1, #dataPath do
+					terminalNode = terminalNode[dataPath[nodeIndex]]
 				end
 
 
@@ -482,21 +567,17 @@ if not Runs:IsClient() then -- Server :
 		end)
 	end
 
-	function SLEnvironment:ConnectToClientPath(player, envType, keyPath : string, func : (remainingNodes : {string}, value : any) -> nil)
-		local connectionNodes = keyPath:split"."
-
-		return getClientEnv(envType):Connect(function(firingPlayer, path : string, value : any)
+	function SLEnvironment:ConnectToClientPath(player, envType, keyPath, func : (remainingNodes : {string}, value : any) -> nil)
+		return getClientEnv(envType):Connect(function(firingPlayer, path, value : any)
 			if firingPlayer ~= player then return end
 			
-			local splitNodes = path:split"."
+			for i = #keyPath, 1, -1 do
+				if keyPath[i] ~= path[i] then return end
 
-			for i = #connectionNodes, 1, -1 do
-				if connectionNodes[i] ~= splitNodes[i] then return end
-
-				table.remove(splitNodes, i)
+				table.remove(path, i)
 			end
 
-			func(splitNodes, value)
+			func(path, value)
 		end)
 	end
 
@@ -582,19 +663,15 @@ else -- Client :
 		return getServerEnv(envType):Connect(func)
 	end
 
-	function SLEnvironment:ConnectToEnvironmentPath(envType, keyPath : string, func : (remainingNodes : {string}, value : any) -> nil)
-		local connectionNodes = keyPath:split"."
+	function SLEnvironment:ConnectToEnvironmentPath(envType, keyPath, func : (remainingNodes : {string}, value : any) -> nil)
+		return getServerEnv(envType):Connect(function(path, value : any)
+			for i = #keyPath, 1, -1 do
+				if keyPath[i] ~= path[i] then return end
 
-		return getServerEnv(envType):Connect(function(path : string, value : any)
-			local splitNodes = path:split"."
-
-			for i = #connectionNodes, 1, -1 do
-				if connectionNodes[i] ~= splitNodes[i] then return end
-
-				table.remove(splitNodes, i)
+				table.remove(path, i)
 			end
 
-			func(splitNodes, value)
+			func(path, value)
 		end)
 	end
 
@@ -613,12 +690,11 @@ else -- Client :
 		thisMeta.Connection = getServerEnv(envType):Connect(function(dataPath, value)
 			local terminalNode = iniT
 
-			local theseNodes = dataPath:split"."
-			local key; key, theseNodes[#theseNodes] = theseNodes[#theseNodes], nil
+			local key; key, dataPath[#dataPath] = dataPath[#dataPath], nil
 
 			-- Skip first instead of removing. Removing is an order N operation.
-			for nodeIndex = 1, #theseNodes do
-				terminalNode = terminalNode[theseNodes[nodeIndex]]
+			for nodeIndex = 1, #dataPath do
+				terminalNode = terminalNode[dataPath[nodeIndex]]
 			end
 
 			if type(terminalNode[key]) == "table" then closeTable(terminalNode[key]) end
@@ -644,7 +720,7 @@ else -- Client :
 		
 		local updatedEvent = getClientEnv(envType)
 
-		pL.Hook(function(dataPath : string, value)
+		pL:Hook(function(dataPath : string, value)
 			updatedEvent:FireServer(dataPath, value)
 		end)
 		

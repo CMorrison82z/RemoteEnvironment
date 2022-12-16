@@ -21,17 +21,16 @@ local changedSig = Signal.new()
 
 remEnvEvent:Connect(function(kPath, value)
 	local terminalNode = iniT
-
-	local theseNodes = kPath:split"."
-	local key; key, theseNodes[#theseNodes] = theseNodes[#theseNodes], nil
+	
+	local key; key, kPath[#kPath] = kPath[#kPath], nil
 		
-	for nodeIndex = 1, #theseNodes do
-		terminalNode = terminalNode[theseNodes[nodeIndex]]
+	for nodeIndex = 1, #kPath do
+		terminalNode = terminalNode[kPath[nodeIndex]]
 	end
 
 	if type(terminalNode[key]) == "table" then closeTable(terminalNode[key]) end
 	
-	changedSig:Fire(theseNodes, key, terminalNode[key], value)
+	changedSig:Fire(kPath, key, terminalNode[key], value)
 
 	terminalNode[key] = value
 end)

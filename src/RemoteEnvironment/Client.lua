@@ -1,3 +1,53 @@
+local RS = game:GetService("ReplicatedStorage")
+local Players = game:GetService"Players"
+local Runs = game:GetService"RunService"
+
+local ENVIRONMENT_TYPES = {
+	Universal = "Universal",
+	Server = "Server",
+	Client = "Client"
+}
+
+local SLEnvironment = {}
+SLEnvironment.Types = ENVIRONMENT_TYPES
+
+local function DeepCopy(t, preserveMetatable : boolean?, preserveFunctions : boolean?)
+	local copy = {}
+
+	local selfFunc = DeepCopy -- Caching the function because it is being indexed multiple times in the loop.
+
+	for i, v in pairs(t) do
+		if type(v) == "function" then
+			if not preserveFunctions then continue end
+		elseif typeof(v) == "table" then
+			copy[i] = selfFunc(v)
+		else
+			copy[i] = v
+		end
+	end
+
+	if preserveMetatable then
+		setmetatable(copy, getmetatable(t))
+	end
+
+	return copy
+end
+
+local function closeTable(t)
+	setmetatable(t, {
+		__index = function()
+			error("This table has been closed and should no longer be used")
+		end,
+		__newindex = function()
+			error("This table has been closed and should no longer be used")
+		end
+	})
+
+	table.clear(t)
+end
+
+-- recursively sets proxies for table-values in the base table.
+
 local function callbackTable(t, _callbacks, currentPath)
 	local p = newproxy(true)
 	local mt = getmetatable(p)
@@ -256,20 +306,109 @@ local function callbackTable(t, _callbacks, currentPath)
 	return p
 end
 
-local remEnv = callbackTable{}
+local serverOwnedEnvironments = {}
+local clientOwnedEnvironments = {}
 
-local comm = Instance.new"RemoteEvent"
-comm.Parent = script.Parent
+local ServerRemFolder = script.Parent:WaitForChild"ServerEnvNet"
+local ClientRemFolder = script.Parent:WaitForChild"ClientEnvNet"
 
-local clientInit = Instance.new"RemoteFunction"
-clientInit.Parent = script.Parent
 
-clientInit.OnServerInvoke = function(player)
-	return remEnv.GetRawSelf()
+SLEnvironment.Environments = {
+	Server = serverOwnedEnvironments,
+	Client = clientOwnedEnvironments
+}
+
+local function getServerEnv(name)
+	return ServerRemFolder:WaitForChild(name)
 end
 
-remEnv.Hook(function(kPath, value)
-	comm:FireAllClients(kPath, value)
+local function getClientEnv(name)
+	return ClientRemFolder:WaitForChild(name)
+end
+
+function SLEnvironment:WaitForServer(envType : string)
+	while not serverOwnedEnvironments[envType] do
+		wait()
+	end
+
+	return serverOwnedEnvironments[envType]
+end
+
+function SLEnvironment:WaitForClient(envType : string)
+	while not clientOwnedEnvironments[envType] do
+		wait()
+	end
+
+	return clientOwnedEnvironments[envType]
+end
+
+function SLEnvironment:ConnectTo(envType : string, func)
+	return getServerEnv(envType):Connect(func)
+end
+
+function SLEnvironment:ConnectToEnvironmentPath(envType, keyPath, func : (remainingNodes : {string}, value : any) -> nil)
+	return getServerEnv(envType):Connect(function(path, value : any)
+		for i = #keyPath, 1, -1 do
+			if keyPath[i] ~= path[i] then return end
+
+			table.remove(path, i)
+		end
+
+		func(path, value)
+	end)
+end
+
+local metaData = {}
+
+script:WaitForChild("CreatedServerEvent").OnClientEvent:Connect(function(envType, iniT)
+	if serverOwnedEnvironments[envType] then warn(envType, "environment being overwritten") end
+
+	serverOwnedEnvironments[envType] = iniT
+
+	-- TODO : if metadata already exists, need to clean it first.
+
+	local thisMeta = {}
+	metaData[envType] = thisMeta
+	
+	thisMeta.Connection = getServerEnv(envType):Connect(function(dataPath, value)
+		local terminalNode = iniT
+
+		local key; key, dataPath[#dataPath] = dataPath[#dataPath], nil
+
+		-- Skip first instead of removing. Removing is an order N operation.
+		for nodeIndex = 1, #dataPath do
+			terminalNode = terminalNode[dataPath[nodeIndex]]
+		end
+
+		if type(terminalNode[key]) == "table" then closeTable(terminalNode[key]) end
+
+		terminalNode[key] = value
+	end)
 end)
 
-return remEnv
+script:WaitForChild("RemovedServerEvent").OnClientEvent:Connect(function(envType)
+	if not metaData[envType] then return warn("None", envType) end
+
+	metaData[envType].Connection:Disconnect()
+
+	-- TODO : Notify before closing the table.
+
+	closeTable(serverOwnedEnvironments[envType])
+
+	serverOwnedEnvironments[envType] = nil
+end)
+
+script:WaitForChild"CreatedClientEvent".OnClientEvent:Connect(function(envType, iniT)
+	local pL = newCallbackTable(iniT)
+	
+	local updatedEvent = getClientEnv(envType)
+
+	pL:Hook(function(dataPath : string, value)
+		updatedEvent:FireServer(dataPath, value)
+	end)
+	
+	clientOwnedEnvironments[envType] = pL
+	
+end)
+
+script:WaitForChild"Loaded":FireServer()
