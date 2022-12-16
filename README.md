@@ -6,7 +6,32 @@ Facilitates shared tables between server and client. Creation of a RemoteEnviron
 
 Currently in very early stages, and minor care was taken for upholding standard styling practices, in favor of laying out a roughdraft quickly.
 
-## Universal
+## Usage
+
+### General
+
+```lua
+-- Server :
+
+local serverOwnedEnv = RemoteEnvironment:CreateServerHost("Player", {
+	SomeField = 100
+})
+
+RemoteEnvironment:Subscribe(serverOwnedEnv, somePlayer)
+
+-- Another script :
+
+local serverOwnedEnvForPlayer = RemoteEnvironment:GetEnvironmentFromSubscriber("Player", somePlayer)
+
+
+-- Client : 
+
+local serviceRemoteEnvironment = RemoteEnvironment:WaitForServer("Player")
+
+local _connection = RemoteEnvironment:ConnectToEnvironmentPath("Player", keyPath, func)
+```
+
+### Universal
 
 The universal environment is created automatically and is immediately ready for use via:
 ```lua
@@ -19,28 +44,4 @@ local universalEnv = require(RemoteEnvironment).Environments.Universal
 local serviceRemoteEnvironment = RemoteEnvironment:WaitForServer(RemoteEnvironment.Types.Universal)
 
 local _connection = RemoteEnvironment:ConnectToEnvironmentPath(RemoteEnvironment.Types.Universal, keyPath, func)
-```
-
-## Knit
-
-```lua
--- Service :
-
-local SERVICE_NAME = "MyName"
-
-local service = Knit.CreateService{
-	Name = SERVICE_NAME,
-
-	Client = {
-		RemoteEnvironment = Knit.CreateProperty(SERVICE_NAME)
-	}
-}
-
--- Client :
-
-local serviceRemoteName = _G.Interpreter.GetKnitPropertyAsync(SomeService.RemoteEnvironment)
-
-local serviceRemoteEnvironment = RemoteEnvironment:WaitForServer(serviceRemoteName)
-
-local _connection = RemoteEnvironment:ConnectToEnvironmentPath(serviceRemoteName, keyPath, func)
 ```

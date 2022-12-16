@@ -21,7 +21,6 @@ local Players = game:GetService"Players"
 local Runs = game:GetService"RunService"
 
 local BridgeNet = require(script.BridgeNet)
-local Signal = require(script.Signal)
 
 local ENVIRONMENT_TYPES = {
 	Universal = "Universal",
@@ -68,75 +67,180 @@ local function closeTable(t)
 end
 
 -- recursively sets proxies for table-values in the base table.
-local function getProxyListener(t, accessSignal : BindableEvent, keyNamePath : string?)
-	if not accessSignal or not accessSignal.Fire then return error("Did not provide access signaler") end
 
-	keyNamePath = keyNamePath or "Base"
+export type ProxyTable = {
+	Get : (key : any) -> any,
+	Set : (key : any, value : any) -> nil,
+	Hook : (func : (...any) -> nil) -> nil,
+	HookPath : (path : string, func : (...any) -> nil) -> nil,
+	UnhookPath : (path : string) -> nil,
+	GetRawSelf : () -> table
+}
 
-	local prox = newproxy(true)
-	local proxMeta = getmetatable(prox)
+local function callbackTable(t, _callbacks, currentPath)
+	local p = newproxy(true)
+	local mt = getmetatable(p)
 
-	local specialKeys = {
-		_true = function()
-			return t
-		end,
-		_signal = function()
-			return accessSignal
-		end
-	}
+	currentPath = currentPath or "Base"
 
-	proxMeta.__index = function(self, k)
-		local val = t[k]
+	local function fireCallbacks(path, v)
+		local pathSplit = path:split(".")
 
-		if val == nil then
-			local sKfunc = specialKeys[k]
+		local currPath;
 
-			if sKfunc then
-				return sKfunc()
-			else
-				return val
-			end
-		end		
-
-		if type(val) == "table" then
-			return getProxyListener(val, accessSignal, keyNamePath .. "." .. k)
-		else
-			return val
-		end
-	end
-
-	proxMeta.__newindex = function(self, k, v)
-		if (type(v) == "function") then error("Cannot assign a table or function") end
-
-		if (type(v) == "table") then
-			assert(not getmetatable(v), "Cannot assign a table with a metatable.")
-			warn("Table is evolving")
-
-			-- Clone table for use in the proxy table.
-			local cT = table.clone(v)
+		for i, nextNode in ipairs(pathSplit) do
+			currPath = currPath and currPath .. "." .. nextNode or nextNode
 			
-			-- Clear contents of the old table and turn it into another proxy.
-			table.clear(v)
-			setmetatable(v, proxMeta)
+			if _callbacks[currPath] then
+				local remainingPath = path:gsub(i ~= #pathSplit and currPath .. "." or currPath, "")
+				remainingPath = remainingPath:len() > 0 and remainingPath
 
-			-- set v to the cloned table so that it is assigned and fired correctly by the signal.
-			v = cT
+				for _, cb in ipairs(_callbacks[currPath]) do
+					coroutine.wrap(cb)(remainingPath, v)
+				end
+			end
+		end
+	end
+
+	local Methods = {}
+	mt.__index = Methods
+
+	function Methods.Get(kPath)
+		local pathSplit = kPath:split(".")
+
+		local head = t
+
+		for i = 1, #pathSplit - 1 do
+			head = head[pathSplit[i]]
 		end
 
-		t[k] = v
+		local v = head[pathSplit[#pathSplit]]
+		local _typeV = type(v)
 
-		accessSignal:Fire(keyNamePath, k, v)
+		if _typeV == "table" then
+			return callbackTable(v, _callbacks, currentPath .. "." .. kPath)
+		else
+			return v
+		end
 	end
 
-	proxMeta.__pairs = function()
-		return next, t, nil
+	-- path can take the form "Key1.Key2.Keys"
+	function Methods.Set(kPath, v)
+		local pathSplit = kPath:split(".")
+
+		local head = t
+
+		for i = 1, #pathSplit - 1 do
+			head = head[pathSplit[i]]
+		end
+
+		head[pathSplit[#pathSplit]] = v
+
+		fireCallbacks(currentPath .. "." .. kPath, v)
+	end
+	
+	local _nestedHooks = {}
+
+	-- * The child proxy copies its RawSelf into this proxy. However, this proxy is hooked with a function that will error upon attempting to use Set on
+	-- * the path of the child proxy.
+	function Methods.Nest(kPath, otherProxy : ProxyTable)
+		assert(not _nestedHooks[otherProxy], "A hook already exists for this proxy! Did you already call Nest on this proxy ?")
+
+		-- Up value for tracking valid modifications.
+		local _isValid = false
+
+		local hookF = function(modPath, val)
+			_isValid = true
+			
+			Methods.Set(kPath .. "." .. modPath, val)
+		end
+
+		local sHookF = function()
+			if _isValid then
+				_isValid = false
+			else
+				error("Parent proxy cannot modify inner proxy")
+			end
+		end
+		
+		local _rawOther = otherProxy.GetRawSelf()
+		
+		_nestedHooks[_rawOther] = {
+			self = sHookF,
+			other = hookF
+		}
+		
+		Methods.Set(kPath, _rawOther)
+
+		Methods.HookPath(kPath, sHookF)
+		otherProxy.Hook(hookF)
 	end
 
-	proxMeta.__len = function()
-		return #t
+	function Methods.Unnest(kPath, otherProxy)
+		local _nestedT = Methods.Get(kPath).GetRawSelf()
+		
+		assert(_nestedT == otherProxy.GetRawSelf(), "Retrieved table does not match proxy's table.")
+		
+		local hooks = _nestedHooks[_nestedT]
+		assert(hooks, "No hook exists for this proxy! Did you already call Unnest for this proxy ?")
+
+		otherProxy.Unhook(nil, hooks.other)
+		Methods.Unhook(kPath, hooks.self)
+		_nestedHooks[otherProxy] = nil
+		
+		Methods.Set(kPath)
+	end
+	
+	function Methods.Hook(f : (kPath : string, val : any) -> nil)
+		local pCallbacks = _callbacks[currentPath]
+
+		if not pCallbacks then
+			pCallbacks = {}
+			_callbacks[currentPath] = pCallbacks
+		end
+
+		table.insert(pCallbacks, f)
+	end
+	
+	function Methods.HookPath(path, f : (kPath : string, val : any) -> nil)
+		local _fullPath = currentPath .. "." .. path
+		
+		local pCallbacks = _callbacks[_fullPath]
+
+		if not pCallbacks then
+			pCallbacks = {}
+			_callbacks[_fullPath] = pCallbacks
+		end
+		
+		table.insert(pCallbacks, f)
 	end
 
-	return prox
+	function Methods.Unhook(path, f)
+		path = currentPath .. (path and "." .. path or "")
+
+		local pCallbacks = _callbacks[path]
+
+		if not pCallbacks then
+			pCallbacks = {}
+			_callbacks[path] = pCallbacks
+		end
+
+		local cbInd = table.find(pCallbacks, f)
+
+		if not cbInd then return warn("NO CALLBACK FOUND") end
+
+		table.remove(pCallbacks, cbInd)
+	end
+
+	function Methods.GetRawSelf()
+		return t
+	end
+
+	return p
+end
+
+local function newCallbackTable(t) : ProxyTable
+	return callbackTable(t, {})
 end
 
 if not Runs:IsClient() then -- Server :
@@ -220,16 +324,14 @@ if not Runs:IsClient() then -- Server :
 	
 	-- It's assumed that a universal environment will exist forever.
 	do
-		local accessSignal = Signal.new()
-
-		local pL = getProxyListener({}, accessSignal)
+		local pL = newCallbackTable({})
 		SLEnvironment.Environments.Universal = pL
 
 		do
 			local envUpdatedEvent = getServerEnv(ENVIRONMENT_TYPES.Universal)
 
-			accessSignal:Connect(function(dataPath, key, value)
-				envUpdatedEvent:FireAll(dataPath, key, value)
+			pL.Hook(function(dataPath, value)
+				envUpdatedEvent:FireAll(dataPath, value)
 			end)
 		end
 
@@ -240,18 +342,17 @@ if not Runs:IsClient() then -- Server :
 
 		metaData[pL] = {
 			Type = ENVIRONMENT_TYPES.Universal,
-			Signal = accessSignal
 		}
 		
 		Players.PlayerAdded:Connect(function(player)
 			WaitForPlayerLoaded(player)
-			createdServerEvent:FireClient(player, ENVIRONMENT_TYPES.Universal, pL._true)
+			createdServerEvent:FireClient(player, ENVIRONMENT_TYPES.Universal, pL.GetRawSelf())
 		end)
 
 		for index, player in ipairs(Players:GetPlayers()) do
 			WaitForPlayerLoaded(player)
 
-			createdServerEvent:FireClient(player, ENVIRONMENT_TYPES.Universal, pL._true)
+			createdServerEvent:FireClient(player, ENVIRONMENT_TYPES.Universal, pL.GetRawSelf())
 		end
 	end
 
@@ -260,16 +361,14 @@ if not Runs:IsClient() then -- Server :
 
 		local Subscribers = {}
 
-		local accessSignal = Signal.new()
-
-		local pL = getProxyListener(iniT, accessSignal)
+		local pL = newCallbackTable(iniT)
 
 		do
 			local envUpdatedEvent = getServerEnv(envType)
 
-			accessSignal:Connect(function(dataPath, key, value)
+			pL.Hook(function(dataPath, value)
 				for _, player in ipairs(Subscribers) do
-					envUpdatedEvent:FireTo(player, dataPath, key, value)
+					envUpdatedEvent:FireTo(player, dataPath, value)
 				end
 			end)
 		end
@@ -277,7 +376,6 @@ if not Runs:IsClient() then -- Server :
 		metaData[pL] = {
 			Subscribers = Subscribers,
 			Type = envType,
-			Signal = accessSignal
 		}
 
 		if not serverOwnedEnvironments[envType] then serverOwnedEnvironments[envType] = {} end
@@ -290,8 +388,6 @@ if not Runs:IsClient() then -- Server :
 	function SLEnvironment:DestroyServerHost(remoteEnvironment)
 		local pMeta = metaData[remoteEnvironment]
 
-		pMeta.Signal:Destroy()
-
 		for index, sub in ipairs(pMeta.Subscribers) do
 			removedServerEvent:FireClient(sub, pMeta.Type)
 		end
@@ -301,8 +397,37 @@ if not Runs:IsClient() then -- Server :
 		table.clear(pMeta.Subscribers)
 		table.clear(pMeta)
 
-
 		metaData[remoteEnvironment] = nil
+	end
+
+	function SLEnvironment:Subscribe(remoteEnvironment : ProxyTable, player)
+		local pInfo = WaitForPlayerLoaded(player)
+
+		local remEnvMeta = metaData[remoteEnvironment]
+
+		if table.find(remEnvMeta.Subscribers, player) then warn(player, "already subscribed to an environment of type", remEnvMeta.Type) end
+
+		table.insert(remEnvMeta.Subscribers, player)
+
+		createdServerEvent:FireClient(player, remEnvMeta.Type, remoteEnvironment.GetRawSelf())
+	end
+
+	function SLEnvironment:Unsubscribe(remoteEnvironment, player)
+		local remEnvMeta = metaData[remoteEnvironment]
+
+		table.remove(remEnvMeta.Subscribers, table.find(remEnvMeta.Subscribers, player))
+
+		removedServerEvent:FireClient(player, remEnvMeta.Type)
+	end
+
+	function SLEnvironment:GetEnvironmentFromSubscriber(envType, subscriber : Player)
+		for _, env in ipairs(serverOwnedEnvironments[envType]) do
+			if table.find(metaData[env].Subscribers, subscriber) then
+				return env
+			end
+		end
+
+		warn("No environment '" .. envType .. "' with subscriber '" .. subscriber.Name .. "'")
 	end
 
 	local _cEventConns = {}
@@ -317,7 +442,7 @@ if not Runs:IsClient() then -- Server :
 		if not _cEventConns[envType] then
 			local cachedEnvs = {} -- ! Possible danger of a player disconnecting from server, reconnecting and having their old cache.
 
-			_cEventConns[envType] = getClientEnv(envType):Connect(function(player, dataPath, key, value)
+			_cEventConns[envType] = getClientEnv(envType):Connect(function(player, dataPath, value)
 				local cEnv = cachedEnvs[player]
 
 				if not cEnv then
@@ -330,9 +455,10 @@ if not Runs:IsClient() then -- Server :
 				local terminalNode = cEnv
 
 				local theseNodes = dataPath:split"."
+				local key; key, theseNodes[#theseNodes] = theseNodes[#theseNodes], nil
 
 				-- Skip first instead of removing. Removing is an order N operation.
-				for nodeIndex = 2, #theseNodes do
+				for nodeIndex = 1, #theseNodes do
 					terminalNode = terminalNode[theseNodes[nodeIndex]]
 				end
 
@@ -340,8 +466,6 @@ if not Runs:IsClient() then -- Server :
 				if type(terminalNode[key]) == "table" then closeTable(terminalNode[key]) end
 
 				terminalNode[key] = value
-
-				-- cEnv.Changed:Fire(dataPath, key, value) -- * ?? Do we need this ?
 			end)
 		end
 
@@ -351,17 +475,17 @@ if not Runs:IsClient() then -- Server :
 	end
 
 	function SLEnvironment:ConnectToClient(player, envType, func)
-		return getClientEnv(envType):Connect(function(firingPlayer, dataPath, key, value)
+		return getClientEnv(envType):Connect(function(firingPlayer, dataPath, value)
 			if player ~= firingPlayer then return end
 
-			func(dataPath, key, value)
+			func(dataPath, value)
 		end)
 	end
 
 	function SLEnvironment:ConnectToClientPath(player, envType, keyPath : string, func : (remainingNodes : {string}, value : any) -> nil)
 		local connectionNodes = keyPath:split"."
 
-		return getClientEnv(envType):Connect(function(firingPlayer, path : string, nodeKey, value : any)
+		return getClientEnv(envType):Connect(function(firingPlayer, path : string, value : any)
 			if firingPlayer ~= player then return end
 			
 			local splitNodes = path:split"."
@@ -372,30 +496,8 @@ if not Runs:IsClient() then -- Server :
 				table.remove(splitNodes, i)
 			end
 
-			table.insert(splitNodes, nodeKey)
-
 			func(splitNodes, value)
 		end)
-	end
-
-	function SLEnvironment:Subscribe(remoteEnvironment, player)
-		local pInfo = WaitForPlayerLoaded(player)
-
-		local remEnvMeta = metaData[remoteEnvironment]
-
-		if table.find(remEnvMeta.Subscribers, player) then warn(player, "already subscribed to an environment of type", remEnvMeta.Type) end
-
-		table.insert(remEnvMeta.Subscribers, player)
-
-		createdServerEvent:FireClient(player, remEnvMeta.Type, remoteEnvironment._true)
-	end
-
-	function SLEnvironment:Unsubscribe(remoteEnvironment, player)
-		local remEnvMeta = metaData[remoteEnvironment]
-
-		table.remove(remEnvMeta.Subscribers, table.find(remEnvMeta.Subscribers, player))
-
-		removedServerEvent:FireClient(player, remEnvMeta.Type)
 	end
 
 	LoadedEvent.OnServerEvent:Connect(function(player)
@@ -483,7 +585,7 @@ else -- Client :
 	function SLEnvironment:ConnectToEnvironmentPath(envType, keyPath : string, func : (remainingNodes : {string}, value : any) -> nil)
 		local connectionNodes = keyPath:split"."
 
-		return getServerEnv(envType):Connect(function(path : string, nodeKey, value : any)
+		return getServerEnv(envType):Connect(function(path : string, value : any)
 			local splitNodes = path:split"."
 
 			for i = #connectionNodes, 1, -1 do
@@ -491,8 +593,6 @@ else -- Client :
 
 				table.remove(splitNodes, i)
 			end
-
-			table.insert(splitNodes, nodeKey)
 
 			func(splitNodes, value)
 		end)
@@ -510,13 +610,14 @@ else -- Client :
 		local thisMeta = {}
 		metaData[envType] = thisMeta
 		
-		thisMeta.Connection = getServerEnv(envType):Connect(function(dataPath, key, value)
+		thisMeta.Connection = getServerEnv(envType):Connect(function(dataPath, value)
 			local terminalNode = iniT
 
 			local theseNodes = dataPath:split"."
+			local key; key, theseNodes[#theseNodes] = theseNodes[#theseNodes], nil
 
 			-- Skip first instead of removing. Removing is an order N operation.
-			for nodeIndex = 2, #theseNodes do
+			for nodeIndex = 1, #theseNodes do
 				terminalNode = terminalNode[theseNodes[nodeIndex]]
 			end
 
@@ -539,14 +640,12 @@ else -- Client :
 	end)
 
 	script:WaitForChild"CreatedClientEvent".OnClientEvent:Connect(function(envType, iniT)
-		local accessSignal = Signal.new()
-
-		local pL = getProxyListener(iniT, accessSignal)
+		local pL = newCallbackTable(iniT)
 		
 		local updatedEvent = getClientEnv(envType)
 
-		accessSignal:Connect(function(dataPath : string, key, value)
-			updatedEvent:FireServer(dataPath, key, value)
+		pL.Hook(function(dataPath : string, value)
+			updatedEvent:FireServer(dataPath, value)
 		end)
 		
 		clientOwnedEnvironments[envType] = pL
