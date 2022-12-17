@@ -366,28 +366,30 @@ SLEnvironment.Environments = {
 	Client = clientOwnedEnvironments
 }
 
+local _topSrc = script.Parent
+
 local LoadedEvent = Instance.new"RemoteEvent"
 LoadedEvent.Name = "Loaded"
-LoadedEvent.Parent = script.Parent
+LoadedEvent.Parent = _topSrc
 
 local createdServerEvent = Instance.new"RemoteEvent"
 createdServerEvent.Name = "CreatedServerEvent"
-createdServerEvent.Parent = script.Parent
+createdServerEvent.Parent = _topSrc
 
 local removedServerEvent = Instance.new"RemoteEvent"
 removedServerEvent.Name = "RemovedServerEvent"
-removedServerEvent.Parent = script.Parent
+removedServerEvent.Parent = _topSrc
 
 local createdClientEvent = Instance.new"RemoteEvent"
 createdClientEvent.Name = "CreatedClientEvent"
-createdClientEvent.Parent = script.Parent
+createdClientEvent.Parent = _topSrc
 
 local ServerRemFolder = Instance.new"Folder"
-ServerRemFolder.Parent = script.Parent
+ServerRemFolder.Parent = _topSrc
 ServerRemFolder.Name = "ServerEnvNet"
 
 local ClientRemFolder = Instance.new"Folder"
-ClientRemFolder.Parent = script.Parent
+ClientRemFolder.Parent = _topSrc
 ClientRemFolder.Name = "ClientEnvNet"
 
 local loadedPlayers = {}
