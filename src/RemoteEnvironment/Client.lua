@@ -136,6 +136,33 @@ local function callbackTable(t, _callbacks, currentPath)
 		fireCallbacks(union(currentPath, kPath), v)
 	end
 
+	function Methods:Clear(kPath)
+		local head = t
+
+		for i = 1, #kPath do
+			head = head[kPath[i]]
+		end
+
+		local keysToFire = {}
+
+		for k in head do
+			table.insert(keysToFire, k)
+		end
+
+		table.clear(head)
+
+		local tblPath = union(currentPath, kPath)
+		local pathLenPlusOne = #tblPath + 1
+
+		for _, k in keysToFire do
+			tblPath[pathLenPlusOne] = k
+
+			fireCallbacks(tblPath, nil)
+
+			tblPath[pathLenPlusOne] = nil
+		end
+	end
+
 	-- Prepares a path of tables
 	function Methods:Pave(kPath)
 		local head = t
@@ -151,6 +178,38 @@ local function callbackTable(t, _callbacks, currentPath)
 			end
 
 			head = head[node]
+		end
+	end
+
+	function Methods:Reconcile(kPath, referenceTable, oneWay : boolean)
+		local pathedTo = #kPath > 0 and self:Get(kPath) or self
+		local pathedT = pathedTo:GetRawSelf()
+
+		-- reconcile values in table2 with reconciledTable
+		for key, value in referenceTable do
+			if type(value) == "table" then
+				pathedT[key] = pathedT[key] or {}
+
+				pathedTo:Reconcile({key}, value, oneWay)
+			else
+				if pathedT[key] ~= value then
+					pathedTo:Set({key}, value)
+				end
+			end
+		end
+		
+		if not oneWay then
+			for key, value in pathedT do
+				if type(value) == "table" then
+					if not referenceTable[key] then
+						pathedTo:Set({key}, nil)
+					end
+				else
+					if referenceTable[key] ~= value then
+						pathedTo:Set({key}, value)
+					end
+				end
+			end
 		end
 	end
 
@@ -258,6 +317,8 @@ local function callbackTable(t, _callbacks, currentPath)
 	end
 
 	function Methods:Hook(f : (kPath : {any}, val : any) -> nil)
+		assert(f, "Verify you're using ':' for method call.")
+		
 		local cbKey = table.concat(currentPath, ".")
 		local pCallbacks = _callbacks[cbKey]
 

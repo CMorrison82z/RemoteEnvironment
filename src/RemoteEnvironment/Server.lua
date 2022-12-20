@@ -154,6 +154,33 @@ local function callbackTable(t, _callbacks, currentPath)
 		fireCallbacks(union(currentPath, kPath), v)
 	end
 
+	function Methods:Clear(kPath)
+		local head = t
+
+		for i = 1, #kPath do
+			head = head[kPath[i]]
+		end
+
+		local keysToFire = {}
+
+		for k in head do
+			table.insert(keysToFire, k)
+		end
+
+		table.clear(head)
+
+		local tblPath = union(currentPath, kPath)
+		local pathLenPlusOne = #tblPath + 1
+
+		for _, k in keysToFire do
+			tblPath[pathLenPlusOne] = k
+
+			fireCallbacks(tblPath, nil)
+
+			tblPath[pathLenPlusOne] = nil
+		end
+	end
+
 	-- Prepares a path of tables
 	function Methods:Pave(kPath)
 		local head = t
@@ -579,7 +606,6 @@ function SLEnvironment:CreateClientHost(player, envType, iniT : table ?)
 
 			local key; key, dataPath[#dataPath] = dataPath[#dataPath], nil
 
-			-- Skip first instead of removing. Removing is an order N operation.
 			for nodeIndex = 1, #dataPath do
 				terminalNode = terminalNode[dataPath[nodeIndex]]
 			end
@@ -597,15 +623,27 @@ function SLEnvironment:CreateClientHost(player, envType, iniT : table ?)
 end
 
 function SLEnvironment:ConnectToClient(player, envType, func)
-	return getClientEnv(envType).OnServerEvent:Connect(function(firingPlayer, dataPath, value)
+	if not connectionsToClientEnvironment[player] then
+		connectionsToClientEnvironment[player] = {}
+	end
+
+	local _conn = getClientEnv(envType).OnServerEvent:Connect(function(firingPlayer, dataPath, value)
 		if player ~= firingPlayer then return end
 
 		func(dataPath, value)
 	end)
+
+	table.insert(connectionsToClientEnvironment[player], _conn)
+
+	return _conn
 end
 
 function SLEnvironment:ConnectToClientPath(player, envType, keyPath, func : (remainingNodes : {string}, value : any) -> nil)
-	return getClientEnv(envType).OnServerEvent:Connect(function(firingPlayer, path, value : any)
+	if not connectionsToClientEnvironment[player] then
+		connectionsToClientEnvironment[player] = {}
+	end
+
+	local _conn = getClientEnv(envType).OnServerEvent:Connect(function(firingPlayer, path, value : any)
 		if firingPlayer ~= player then return end
 
 		for i = #keyPath, 1, -1 do
@@ -616,6 +654,10 @@ function SLEnvironment:ConnectToClientPath(player, envType, keyPath, func : (rem
 
 		func(path, value)
 	end)
+
+	table.insert(connectionsToClientEnvironment[player], _conn)
+
+	return _conn
 end
 
 LoadedEvent.OnServerEvent:Connect(function(player)
@@ -639,6 +681,12 @@ game:GetService"Players".PlayerRemoving:Connect(function(player)
 
 	-- TODO : Decide whether dropping references is enough, or if we should close the tables.
 	table.clear(clientOwnedEnvironments[player])
+
+	for _, _conn in ipairs(connectionsToClientEnvironment[player] or {}) do
+		if _conn.Connected then
+			_conn:Disconnect()
+		end
+	end
 
 	loadedPlayers[player] = nil
 end)
