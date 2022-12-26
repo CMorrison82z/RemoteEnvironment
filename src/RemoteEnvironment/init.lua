@@ -6,6 +6,8 @@ if not RunService:IsClient() then
 	else
 		src = require(script.Server)
 		script.Server.Parent = nil
+
+		return src
 	end
 else
 	return require(script.Client)
