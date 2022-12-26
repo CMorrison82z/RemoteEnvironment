@@ -172,6 +172,38 @@ local function callbackTable(t, _callbacks, currentPath)
 		end
 	end
 
+	function Methods:Reconcile(kPath, referenceTable, oneWay : boolean)
+		local pathedTo = #kPath > 0 and self:Get(kPath) or self
+		local pathedT = pathedTo:GetRawSelf()
+
+		-- reconcile values in table2 with reconciledTable
+		for key, value in referenceTable do
+			if type(value) == "table" then
+				pathedT[key] = pathedT[key] or {}
+
+				pathedTo:Reconcile({key}, value, oneWay)
+			else
+				if pathedT[key] ~= value then
+					pathedTo:Set({key}, value)
+				end
+			end
+		end
+		
+		if not oneWay then
+			for key, value in pathedT do
+				if type(value) == "table" then
+					if not referenceTable[key] then
+						pathedTo:Set({key}, nil)
+					end
+				else
+					if referenceTable[key] ~= value then
+						pathedTo:Set({key}, value)
+					end
+				end
+			end
+		end
+	end
+
 	-- Path specifies the location of the Array to perform the insert method.
 	function Methods:ArrayInsert(kPath, v, atIndex)
 		local head = t
@@ -253,7 +285,7 @@ local function callbackTable(t, _callbacks, currentPath)
 			self = sHookF,
 			other = hookF
 		}
-		
+
 		Methods:Set(kPath, _rawOther)
 
 		Methods:HookPath(kPath, sHookF)
@@ -276,6 +308,8 @@ local function callbackTable(t, _callbacks, currentPath)
 	end
 
 	function Methods:Hook(f : (kPath : {any}, val : any) -> nil)
+		assert(f, "Verify you're using ':' for method call.")
+		
 		local cbKey = table.concat(currentPath, ".")
 		local pCallbacks = _callbacks[cbKey]
 
@@ -332,28 +366,30 @@ SLEnvironment.Environments = {
 	Client = clientOwnedEnvironments
 }
 
+local _topSrc = script.Parent
+
 local LoadedEvent = Instance.new"RemoteEvent"
 LoadedEvent.Name = "Loaded"
-LoadedEvent.Parent = script.Parent
+LoadedEvent.Parent = _topSrc
 
 local createdServerEvent = Instance.new"RemoteEvent"
 createdServerEvent.Name = "CreatedServerEvent"
-createdServerEvent.Parent = script.Parent
+createdServerEvent.Parent = _topSrc
 
 local removedServerEvent = Instance.new"RemoteEvent"
 removedServerEvent.Name = "RemovedServerEvent"
-removedServerEvent.Parent = script.Parent
+removedServerEvent.Parent = _topSrc
 
 local createdClientEvent = Instance.new"RemoteEvent"
 createdClientEvent.Name = "CreatedClientEvent"
-createdClientEvent.Parent = script.Parent
+createdClientEvent.Parent = _topSrc
 
 local ServerRemFolder = Instance.new"Folder"
-ServerRemFolder.Parent = script.Parent
+ServerRemFolder.Parent = _topSrc
 ServerRemFolder.Name = "ServerEnvNet"
 
 local ClientRemFolder = Instance.new"Folder"
-ClientRemFolder.Parent = script.Parent
+ClientRemFolder.Parent = _topSrc
 ClientRemFolder.Name = "ClientEnvNet"
 
 local loadedPlayers = {}
@@ -487,7 +523,7 @@ function SLEnvironment:DestroyServerHost(remoteEnvironment)
 	metaData[remoteEnvironment] = nil
 end
 
-function SLEnvironment:Subscribe(remoteEnvironment : ProxyTable, player)
+function SLEnvironment:Subscribe(remoteEnvironment, player)
 	local pInfo = WaitForPlayerLoaded(player)
 
 	local remEnvMeta = metaData[remoteEnvironment]
